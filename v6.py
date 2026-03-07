@@ -2724,71 +2724,54 @@ def _build_research_context() -> dict:
 
 
 def _call_ai_research(question: str, context: dict, mode: str) -> str:
-    """呼叫 Claude API 進行交易研究分析"""
-    import json, requests
+    """呼叫 Groq API 進行交易研究分析（使用現有 Groq key）"""
+    import json
+
+    api_key = get_groq_key()
+    if not api_key:
+        return "❌ 未設置 API Key，請在側欄輸入 Groq API Key"
 
     system_prompts = {
-        "setup": """你是一位頂尖量化交易分析師。分析交易者的Setup績效數據，
-用繁體中文給出具體、可操作的建議。格式要求：
-- 直接列出最賺錢Setup的排名
-- 每個Setup說明為何有效/無效
-- 給出具體的改進建議和倉位調整
-- 使用數字和百分比支撐每個結論
-- 語氣要像Bloomberg終端的分析報告：精準、簡潔、有力""",
-
-        "market": """你是一位市場環境分析師，專精於識別最適合特定交易策略的市場條件。
-分析交易日誌數據，用繁體中文輸出：
-- 哪種市場環境（趨勢/震盪/高波動）下績效最佳
-- 偵測器信號與交易結果的相關性
-- 最佳交易時段分析
-- VIX水平與勝率的關係""",
-
-        "position": """你是一位風險管理專家。分析倉位大小、止損設置與交易結果的關係，
-用繁體中文給出：
-- 最優倉位大小區間（基於歷史數據）
-- 止損設置的改進建議（R-multiple優化）
-- Kelly公式最優倉位計算
-- 具體的資金管理規則""",
+        "setup": "你是頂尖量化交易分析師。用繁體中文分析Setup績效，直接列出排名和可操作建議，語氣精準有力如Bloomberg報告。",
+        "market": "你是市場環境分析師。用繁體中文分析最適合的市場環境、交易時段和情緒管理建議。",
+        "position": "你是風險管理專家。用繁體中文分析最優倉位大小、止損設置和資金管理規則，基於Kelly公式。",
     }
 
     ctx_str = json.dumps(context, ensure_ascii=False, indent=2)
-    user_msg = f"""交易數據摘要：
+    user_msg = f"""交易數據：
 {ctx_str}
 
-用戶問題：{question}
+問題：{question}
 
-請提供深度分析，要求：
-1. 基於數據給出具體結論（不要含糊）
-2. 識別3個最重要的發現
-3. 給出立即可執行的行動建議
-4. 如數據不足，說明需要收集哪些數據"""
+要求：1)基於數據給具體結論 2)識別3個最重要發現 3)給立即可執行建議 4)用繁體中文純文字回覆"""
 
     try:
         resp = requests.post(
-            "https://api.anthropic.com/v1/messages",
-            headers={
-                "Content-Type": "application/json",
-                "anthropic-version": "2023-06-01",
-            },
+            "https://api.groq.com/openai/v1/chat/completions",
+            headers={"Authorization": f"Bearer {api_key}",
+                     "Content-Type": "application/json"},
             json={
-                "model": "claude-sonnet-4-20250514",
+                "model": "llama-3.3-70b-versatile",
+                "messages": [
+                    {"role": "system", "content": system_prompts.get(mode, system_prompts["setup"])},
+                    {"role": "user",   "content": user_msg},
+                ],
                 "max_tokens": 1500,
-                "system": system_prompts.get(mode, system_prompts["setup"]),
-                "messages": [{"role": "user", "content": user_msg}]
+                "temperature": 0.4,
             },
-            timeout=45
+            timeout=45,
         )
-        data = resp.json()
-        if data.get("content"):
-            return data["content"][0]["text"]
-        elif data.get("error"):
-            return f"API 錯誤：{data['error'].get('message','未知')}"
-        else:
-            return f"回應格式異常：{str(data)[:200]}"
+        if resp.status_code == 401:
+            return "❌ Groq API Key 無效"
+        if resp.status_code == 429:
+            return "⏱ 請求頻率限制，請稍後重試"
+        if resp.status_code != 200:
+            return f"❌ API 錯誤 {resp.status_code}"
+        return resp.json()["choices"][0]["message"]["content"]
     except requests.exceptions.Timeout:
         return "⏱ 請求超時（45秒），請稍後重試"
     except Exception as e:
-        return f"連線錯誤：{type(e).__name__}: {e}"
+        return f"❌ 錯誤：{type(e).__name__}: {e}"
 
 
 def render_ai_research_tab():
@@ -2947,14 +2930,14 @@ def render_ai_research_tab():
               </div>
             </div>"""
 
-        st.markdown(f"""
-        <div style="background:#000;border:1px solid #ff9900;border-radius:4px;padding:20px;font-family:'IBM Plex Mono',monospace;" style="min-height:280px;">
-          <div style="font-family:'Orbitron',monospace;color:#ff9900;font-size:0.65rem;letter-spacing:3px;margin-bottom:12px;border-bottom:1px solid rgba(255,153,0,0.27);padding-bottom:8px;">◈ MODULE 01 ◈ SETUP RANKING</div>
-          <div style="font-family:'IBM Plex Mono',monospace;font-size:0.75rem;">
-            {rows_html if rows_html else '<span style="color:#666;font-size:0.78rem;">數據不足</span>'}
-          </div>
-        </div>
-        """, unsafe_allow_html=True)
+        _m1_html = f"""<!DOCTYPE html><html><body style="margin:0;padding:0;background:transparent;">
+        <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600;700&family=Orbitron:wght@700&display=swap" rel="stylesheet">
+        <div style="background:#000;border:1px solid #ff9900;border-radius:4px;padding:16px;font-family:'IBM Plex Mono',monospace;min-height:240px;">
+          <div style="font-family:'Orbitron',monospace;color:#ff9900;font-size:0.6rem;letter-spacing:3px;margin-bottom:10px;border-bottom:1px solid rgba(255,153,0,0.25);padding-bottom:6px;">◈ MODULE 01 ◈ SETUP RANKING</div>
+          <div style="font-size:0.75rem;">{rows_html if rows_html else '<span style="color:#666;">數據不足</span>'}</div>
+        </div></body></html>"""
+        import streamlit.components.v1 as _comp1
+        _comp1.html(_m1_html, height=280, scrolling=False)
 
         if st.button("🤖 AI 分析最佳 Setup", key="ai_setup", use_container_width=True):
             with st.spinner("⚡ 分析中..."):
@@ -2962,8 +2945,13 @@ def render_ai_research_tab():
                 st.session_state["ai_setup_result"] = result
         if st.session_state.get("ai_setup_result"):
             _ai_txt = st.session_state["ai_setup_result"]
-            st.markdown(f'<div style="background:#050505;border:1px solid rgba(255,153,0,0.4);border-left:3px solid #ff9900;border-radius:3px;padding:16px 20px;font-family:IBM Plex Mono,monospace;font-size:0.8rem;color:#ccaa77;line-height:1.8;white-space:pre-wrap;margin-top:12px;">{_ai_txt}</div>',
-                        unsafe_allow_html=True)
+            import streamlit.components.v1 as _comp_air
+            _ai_esc = _ai_txt.replace("&","&amp;").replace("<","&lt;").replace(">","&gt;")
+            _ai_h = f'''<!DOCTYPE html><html><body style="margin:0;background:#050505;">
+            <div style="border-left:3px solid #ff9900;padding:14px 18px;font-family:IBM Plex Mono,monospace;
+            font-size:0.8rem;color:#ccaa77;line-height:1.8;white-space:pre-wrap;">{_ai_esc}</div>
+            </body></html>'''
+            _comp_air.html(_ai_h, height=min(60+len(_ai_txt)//2,480), scrolling=True)
 
     # ══ 模組 2：最適市場環境 ══════════════════════════════════════════════════
     with col2:
@@ -2993,19 +2981,17 @@ def render_ai_research_tab():
               <span style="color:#666;font-size:0.78rem;">{d['avg_pnl']:+.1f}% ×{d['n']}</span>
             </div>"""
 
-        st.markdown(f"""
-        <div style="background:#000;border:1px solid #ff9900;border-radius:4px;padding:20px;font-family:'IBM Plex Mono',monospace;" style="min-height:280px;">
-          <div style="font-family:'Orbitron',monospace;color:#ff9900;font-size:0.65rem;letter-spacing:3px;margin-bottom:12px;border-bottom:1px solid rgba(255,153,0,0.27);padding-bottom:8px;">◈ MODULE 02 ◈ MARKET ENV</div>
-          <div style="color:#ff990088;font-size:0.65rem;margin-bottom:4px;font-family:'IBM Plex Mono',monospace;">TIME SLOT PERFORMANCE</div>
-          <div style="font-family:'IBM Plex Mono',monospace;font-size:0.75rem;margin-bottom:10px;">
-            {time_rows if time_rows else '<span style="color:#666;font-size:0.78rem;">需要時間數據</span>'}
-          </div>
-          <div style="color:#ff990088;font-size:0.65rem;margin-bottom:4px;font-family:'IBM Plex Mono',monospace;">EMOTION STATE ANALYSIS</div>
-          <div style="font-family:'IBM Plex Mono',monospace;font-size:0.75rem;">
-            {emo_rows if emo_rows else '<span style="color:#666;font-size:0.78rem;">需要情緒記錄</span>'}
-          </div>
-        </div>
-        """, unsafe_allow_html=True)
+        _m2_html = f"""<!DOCTYPE html><html><body style="margin:0;padding:0;background:transparent;">
+        <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600;700&family=Orbitron:wght@700&display=swap" rel="stylesheet">
+        <div style="background:#000;border:1px solid #ff9900;border-radius:4px;padding:16px;font-family:'IBM Plex Mono',monospace;min-height:240px;">
+          <div style="font-family:'Orbitron',monospace;color:#ff9900;font-size:0.6rem;letter-spacing:3px;margin-bottom:10px;border-bottom:1px solid rgba(255,153,0,0.25);padding-bottom:6px;">◈ MODULE 02 ◈ MARKET ENV</div>
+          <div style="color:rgba(255,153,0,0.5);font-size:0.62rem;margin-bottom:4px;">TIME SLOT PERFORMANCE</div>
+          <div style="font-size:0.75rem;margin-bottom:10px;">{time_rows if time_rows else '<span style="color:#666;">需要時間數據</span>'}</div>
+          <div style="color:rgba(255,153,0,0.5);font-size:0.62rem;margin-bottom:4px;">EMOTION STATE ANALYSIS</div>
+          <div style="font-size:0.75rem;">{emo_rows if emo_rows else '<span style="color:#666;">需要情緒記錄</span>'}</div>
+        </div></body></html>"""
+        import streamlit.components.v1 as _comp2
+        _comp2.html(_m2_html, height=320, scrolling=False)
 
         if st.button("🤖 AI 分析最佳市場環境", key="ai_market", use_container_width=True):
             with st.spinner("⚡ 分析中..."):
@@ -3013,8 +2999,13 @@ def render_ai_research_tab():
                 st.session_state["ai_market_result"] = result
         if st.session_state.get("ai_market_result"):
             _ai_txt = st.session_state["ai_market_result"]
-            st.markdown(f'<div style="background:#050505;border:1px solid rgba(255,153,0,0.4);border-left:3px solid #ff9900;border-radius:3px;padding:16px 20px;font-family:IBM Plex Mono,monospace;font-size:0.8rem;color:#ccaa77;line-height:1.8;white-space:pre-wrap;margin-top:12px;">{_ai_txt}</div>',
-                        unsafe_allow_html=True)
+            import streamlit.components.v1 as _comp_air
+            _ai_esc = _ai_txt.replace("&","&amp;").replace("<","&lt;").replace(">","&gt;")
+            _ai_h = f'''<!DOCTYPE html><html><body style="margin:0;background:#050505;">
+            <div style="border-left:3px solid #ff9900;padding:14px 18px;font-family:IBM Plex Mono,monospace;
+            font-size:0.8rem;color:#ccaa77;line-height:1.8;white-space:pre-wrap;">{_ai_esc}</div>
+            </body></html>'''
+            _comp_air.html(_ai_h, height=min(60+len(_ai_txt)//2,480), scrolling=True)
 
     # ══ 模組 3：最佳倉位 ══════════════════════════════════════════════════════
     with col3:
@@ -3048,34 +3039,27 @@ def render_ai_research_tab():
               <span style="color:#666;font-size:0.78rem;">×{d['n']}筆</span>
             </div>"""
 
-        st.markdown(f"""
-        <div style="background:#000;border:1px solid #ff9900;border-radius:4px;padding:20px;font-family:'IBM Plex Mono',monospace;" style="min-height:280px;">
-          <div style="font-family:'Orbitron',monospace;color:#ff9900;font-size:0.65rem;letter-spacing:3px;margin-bottom:12px;border-bottom:1px solid rgba(255,153,0,0.27);padding-bottom:8px;">◈ MODULE 03 ◈ POSITION SIZING</div>
-          <div style="color:#ff990088;font-size:0.65rem;margin-bottom:4px;font-family:'IBM Plex Mono',monospace;">SIZE vs PERFORMANCE</div>
-          <div style="font-family:'IBM Plex Mono',monospace;font-size:0.75rem;margin-bottom:10px;">
-            {size_rows if size_rows else '<span style="color:#666;font-size:0.78rem;">需要倉位數據</span>'}
+        _hk_disp = f'{half_kelly*100:.1f}%' if wins_all and loss_all else '—'
+        _m3_html = f"""<!DOCTYPE html><html><body style="margin:0;padding:0;background:transparent;">
+        <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600;700&family=Orbitron:wght@700&display=swap" rel="stylesheet">
+        <div style="background:#000;border:1px solid #ff9900;border-radius:4px;padding:16px;font-family:'IBM Plex Mono',monospace;min-height:240px;">
+          <div style="font-family:'Orbitron',monospace;color:#ff9900;font-size:0.6rem;letter-spacing:3px;margin-bottom:10px;border-bottom:1px solid rgba(255,153,0,0.25);padding-bottom:6px;">◈ MODULE 03 ◈ POSITION SIZING</div>
+          <div style="color:rgba(255,153,0,0.5);font-size:0.62rem;margin-bottom:4px;">SIZE vs PERFORMANCE</div>
+          <div style="font-size:0.75rem;margin-bottom:10px;">{size_rows if size_rows else '<span style="color:#666;">需要倉位數據</span>'}</div>
+          <div style="color:rgba(255,153,0,0.5);font-size:0.62rem;margin-bottom:6px;">KELLY CRITERION</div>
+          <div>
+            <div style="display:flex;justify-content:space-between;padding:5px 0;border-bottom:1px solid rgba(255,153,0,0.1);">
+              <span style="color:#666;font-size:0.78rem;">Full Kelly</span><span style="color:#ffcc44;font-weight:600;">{kelly_str}</span></div>
+            <div style="display:flex;justify-content:space-between;padding:5px 0;border-bottom:1px solid rgba(255,153,0,0.1);">
+              <span style="color:#666;font-size:0.78rem;">Half Kelly（建議）</span><span style="color:#00ff88;">{_hk_disp}</span></div>
+            <div style="display:flex;justify-content:space-between;padding:5px 0;border-bottom:1px solid rgba(255,153,0,0.1);">
+              <span style="color:#666;font-size:0.78rem;">當前風險設置</span><span style="color:#ffcc44;font-weight:600;">{risk_p}%</span></div>
+            <div style="display:flex;justify-content:space-between;padding:5px 0;">
+              <span style="color:#666;font-size:0.78rem;">建議單筆風險$</span><span style="color:#00ff88;">${acct*risk_p/100:,.0f}</span></div>
           </div>
-          <div style="color:#ff990088;font-size:0.65rem;margin-bottom:6px;font-family:'IBM Plex Mono',monospace;">KELLY CRITERION</div>
-          <div style="font-family:'IBM Plex Mono',monospace;">
-            <div style="display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px solid #ff990022;">
-              <span style="color:#666;font-size:0.78rem;">Full Kelly</span>
-              <span style="color:#ffcc44;font-weight:600;">{kelly_str}</span>
-            </div>
-            <div style="display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px solid #ff990022;">
-              <span style="color:#666;font-size:0.78rem;">Half Kelly (建議)</span>
-              <span style="color:#00ff88;">{f'{half_kelly*100:.1f}%' if wins_all and loss_all else '—'}</span>
-            </div>
-            <div style="display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px solid #ff990022;">
-              <span style="color:#666;font-size:0.78rem;">當前風險設置</span>
-              <span style="color:#ffcc44;font-weight:600;">{risk_p}%</span>
-            </div>
-            <div style="display:flex;justify-content:space-between;padding:4px 0;">
-              <span style="color:#666;font-size:0.78rem;">建議單筆風險$</span>
-              <span style="color:#00ff88;">${acct*risk_p/100:,.0f}</span>
-            </div>
-          </div>
-        </div>
-        """, unsafe_allow_html=True)
+        </div></body></html>"""
+        import streamlit.components.v1 as _comp3
+        _comp3.html(_m3_html, height=320, scrolling=False)
 
         if st.button("🤖 AI 優化倉位策略", key="ai_position", use_container_width=True):
             with st.spinner("⚡ 分析中..."):
@@ -3085,8 +3069,13 @@ def render_ai_research_tab():
                 st.session_state["ai_position_result"] = result
         if st.session_state.get("ai_position_result"):
             _ai_txt = st.session_state["ai_position_result"]
-            st.markdown(f'<div style="background:#050505;border:1px solid rgba(255,153,0,0.4);border-left:3px solid #ff9900;border-radius:3px;padding:16px 20px;font-family:IBM Plex Mono,monospace;font-size:0.8rem;color:#ccaa77;line-height:1.8;white-space:pre-wrap;margin-top:12px;">{_ai_txt}</div>',
-                        unsafe_allow_html=True)
+            import streamlit.components.v1 as _comp_air
+            _ai_esc = _ai_txt.replace("&","&amp;").replace("<","&lt;").replace(">","&gt;")
+            _ai_h = f'''<!DOCTYPE html><html><body style="margin:0;background:#050505;">
+            <div style="border-left:3px solid #ff9900;padding:14px 18px;font-family:IBM Plex Mono,monospace;
+            font-size:0.8rem;color:#ccaa77;line-height:1.8;white-space:pre-wrap;">{_ai_esc}</div>
+            </body></html>'''
+            _comp_air.html(_ai_h, height=min(60+len(_ai_txt)//2,480), scrolling=True)
 
     # ── 綜合 AI 深度報告 ─────────────────────────────────────────────────────
     st.markdown("<br>", unsafe_allow_html=True)
@@ -6694,12 +6683,12 @@ def _render_mtf_confluence(symbol: str, mtf_data: dict):
         + f'</div>'
     )
     st.markdown(f'<div id="mtf-confluence-{symbol}">{div_html}</div>',
-                unsafe_allow_html=True)
+    unsafe_allow_html=True)
 
 
 def render_mtf_summary(symbol, selected_intervals, show_alerts, prepost=False):
     st.markdown(f'<div class="mtf-section-title">🔀 多週期總覽 — {symbol}</div>',
-                unsafe_allow_html=True)
+    unsafe_allow_html=True)
     rows    = []
     mtf_data = {}   # {itvl: {"df": df, "label": label, "trend": trend, ...}}
     for itvl in selected_intervals:
@@ -6786,7 +6775,7 @@ def render_mtf_summary(symbol, selected_intervals, show_alerts, prepost=False):
             f'</div>'
         )
     st.markdown(f'<div id="mtf-rows-{symbol}">{"".join(rows)}</div>',
-                unsafe_allow_html=True)
+    unsafe_allow_html=True)
 
     # ── 多週期共振分析（跨週期連動預測）────────────────────────────────────
     if len(mtf_data) >= 2:
@@ -6800,7 +6789,7 @@ def render_mtf_charts(symbol, selected_intervals, layout_mode, max_bars=90, prep
         st.info("請至少選擇一個時間週期")
         return
     st.markdown(f'<div class="mtf-section-title">📊 多週期 K 線圖 — {symbol}</div>',
-                unsafe_allow_html=True)
+    unsafe_allow_html=True)
 
     if layout_mode == "並排（2欄）":
         pairs = [selected_intervals[i:i+2] for i in range(0, len(selected_intervals), 2)]
@@ -6895,7 +6884,7 @@ def render_single(symbol, interval, show_alerts, max_bars=90, show_pre=False, sh
             f'{_session_label}</div>'
             f'<div style="font-size:0.62rem;color:#445566;">{_data_time_str}</div>'
             f'</div>',
-            unsafe_allow_html=True)
+    unsafe_allow_html=True)
 
     # 如果數據時間超過 15 分鐘，提示用戶刷新
     try:
@@ -6923,7 +6912,7 @@ def render_single(symbol, interval, show_alerts, max_bars=90, show_pre=False, sh
             f'<span class="ema-label">EMA{n} </span>{val:.2f}'
             f'<span style="font-size:0.72rem;opacity:0.6"> {arrow}</span></span>')
     st.markdown('<div class="ema-bar">' + "".join(items) + '</div>',
-                unsafe_allow_html=True)
+    unsafe_allow_html=True)
 
     # 若有任何延長時段開啟，取得 Yahoo Finance 延長時段數據傳給 build_chart
     _ext_for_chart = None
@@ -6958,7 +6947,7 @@ def render_single(symbol, interval, show_alerts, max_bars=90, show_pre=False, sh
         st.markdown(
             '<div style="font-size:1.05rem;font-weight:700;color:#7799cc;margin-bottom:8px;">'
             '💬 Social Sentiment</div>',
-            unsafe_allow_html=True)
+    unsafe_allow_html=True)
         render_social_sentiment(symbol)
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -7032,13 +7021,13 @@ with st.sidebar:
             '<div style="background:#0d2e18;border:1px solid #00aa44;border-radius:6px;'
             'padding:6px 12px;font-size:0.82rem;color:#00ee66;text-align:center;">'
             '🟢 監控中 — 自動刷新中</div>',
-            unsafe_allow_html=True)
+        unsafe_allow_html=True)
     else:
         st.markdown(
             '<div style="background:#1a1e2e;border:1px solid #334466;border-radius:6px;'
             'padding:6px 12px;font-size:0.82rem;color:#556688;text-align:center;">'
             '⏸ 已暫停 — 點「啟動」開始監控</div>',
-            unsafe_allow_html=True)
+    unsafe_allow_html=True)
 
     refresh_sec  = st.slider("刷新間隔（秒）", 30, 300, 60, step=30,
                              disabled=not st.session_state.monitoring)
@@ -7195,7 +7184,7 @@ if st.session_state.alert_log:
         )
     all_cards.append('</div>')
     st.markdown(f'<div id="alert-cards-panel">{"".join(all_cards)}</div>',
-                unsafe_allow_html=True)
+    unsafe_allow_html=True)
 
     # ── 整體市場情緒 ─────────────────────────────────────────────────────────
     total_bull = sum(v["bull"] for v in sym_stats.values())

@@ -2132,8 +2132,8 @@ def render_trading_log():
                   <div style="display:flex;gap:20px;margin-top:6px;flex-wrap:wrap;">
                     <div><span style="color:#445577;">Entry</span> <span style="color:#ccd6ee;font-weight:600;">{t['entry_price']:.2f}</span></div>
                     <div><span style="color:#445577;">Size</span>  <span style="color:#ccd6ee;">{t['size']}</span></div>
-                    <div><span style="color:#ff5566;">Stop</span>  <span style="color:#ff8888;">{sl:.2f if sl else '—'}</span></div>
-                    <div><span style="color:#44dd88;">Target</span><span style="color:#88ffcc;">{tp:.2f if tp else '—'}</span></div>
+                    <div><span style="color:#ff5566;">Stop</span>  <span style="color:#ff8888;">{f'{sl:.2f}' if sl else '—'}</span></div>
+                    <div><span style="color:#44dd88;">Target</span><span style="color:#88ffcc;">{f'{tp:.2f}' if tp else '—'}</span></div>
                     <div><span style="color:#cc88ff;">R:R</span>   <span style="color:#ddaaff;">{f'{rr:.1f}:1' if rr else '—'}</span></div>
                     <div><span style="color:#445577;">Setup</span> <span style="color:#aabbcc;">{t.get('setup','—')}</span></div>
                   </div>

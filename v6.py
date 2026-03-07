@@ -2766,19 +2766,29 @@ def _call_ai_research(question: str, context: dict, mode: str) -> str:
     try:
         resp = requests.post(
             "https://api.anthropic.com/v1/messages",
-            headers={"Content-Type": "application/json"},
+            headers={
+                "Content-Type": "application/json",
+                "anthropic-version": "2023-06-01",
+            },
             json={
                 "model": "claude-sonnet-4-20250514",
                 "max_tokens": 1500,
                 "system": system_prompts.get(mode, system_prompts["setup"]),
                 "messages": [{"role": "user", "content": user_msg}]
             },
-            timeout=30
+            timeout=45
         )
         data = resp.json()
-        return data["content"][0]["text"] if data.get("content") else "AI 分析失敗"
+        if data.get("content"):
+            return data["content"][0]["text"]
+        elif data.get("error"):
+            return f"API 錯誤：{data['error'].get('message','未知')}"
+        else:
+            return f"回應格式異常：{str(data)[:200]}"
+    except requests.exceptions.Timeout:
+        return "⏱ 請求超時（45秒），請稍後重試"
     except Exception as e:
-        return f"連線錯誤：{e}"
+        return f"連線錯誤：{type(e).__name__}: {e}"
 
 
 def render_ai_research_tab():
@@ -2864,8 +2874,8 @@ def render_ai_research_tab():
 
     if not ctx:
         st.markdown("""
-        <div class="tip-terminal">
-          <div class="tip-header">◈ TRADING INTELLIGENCE PLATFORM  ◈  NO DATA</div>
+        <div style="background:#000;border:1px solid #ff9900;border-radius:4px;padding:20px;font-family:'IBM Plex Mono',monospace;">
+          <div style="font-family:'Orbitron',monospace;color:#ff9900;font-size:0.65rem;letter-spacing:3px;margin-bottom:12px;border-bottom:1px solid rgba(255,153,0,0.27);padding-bottom:8px;">◈ TRADING INTELLIGENCE PLATFORM  ◈  NO DATA</div>
           <div style="color:#ff9900;font-family:'IBM Plex Mono',monospace;font-size:0.82rem;">
             ▸ 尚無交易記錄可供分析<br>
             ▸ 請先在「新增交易」Tab 記錄至少 3 筆已平倉交易<br>
@@ -2882,26 +2892,26 @@ def render_ai_research_tab():
 
     # ── 終端機頂部狀態列 ─────────────────────────────────────────────────────
     st.markdown(f"""
-    <div class="tip-terminal">
-      <div class="tip-header">
+    <div style="background:#000;border:1px solid #ff9900;border-radius:4px;padding:20px;font-family:'IBM Plex Mono',monospace;">
+      <div style="font-family:'Orbitron',monospace;color:#ff9900;font-size:0.65rem;letter-spacing:3px;margin-bottom:12px;border-bottom:1px solid rgba(255,153,0,0.27);padding-bottom:8px;">
         ◈ TRADING INTELLIGENCE PLATFORM v1.0 ◈ LIVE ANALYSIS ◈ {n} TRADES LOADED
       </div>
       <div style="display:flex;gap:8px;flex-wrap:wrap;">
-        <div class="tip-metric">
-          <div class="tip-dim">TOTAL TRADES</div>
-          <div class="tip-rank" style="font-size:1.4rem;">{n}</div>
+        <div style="display:inline-block;background:#0a0800;border:1px solid rgba(255,153,0,0.2);border-radius:2px;padding:8px 14px;margin:4px;text-align:center;font-family:'IBM Plex Mono',monospace;">
+          <div style="color:#666;font-size:0.78rem;">TOTAL TRADES</div>
+          <div style="color:#ff9900;font-weight:700;" style="font-size:1.4rem;">{n}</div>
         </div>
-        <div class="tip-metric">
-          <div class="tip-dim">WIN RATE</div>
+        <div style="display:inline-block;background:#0a0800;border:1px solid rgba(255,153,0,0.2);border-radius:2px;padding:8px 14px;margin:4px;text-align:center;font-family:'IBM Plex Mono',monospace;">
+          <div style="color:#666;font-size:0.78rem;">WIN RATE</div>
           <div style="color:{wr_c};font-size:1.4rem;font-weight:700;">{wr:.1f}%</div>
         </div>
-        <div class="tip-metric">
-          <div class="tip-dim">TOTAL PnL</div>
+        <div style="display:inline-block;background:#0a0800;border:1px solid rgba(255,153,0,0.2);border-radius:2px;padding:8px 14px;margin:4px;text-align:center;font-family:'IBM Plex Mono',monospace;">
+          <div style="color:#666;font-size:0.78rem;">TOTAL PnL</div>
           <div class="{'tip-pos' if pnl>=0 else 'tip-neg'}" style="font-size:1.4rem;font-weight:700;">{pnl:+.1f}%</div>
         </div>
-        <div class="tip-metric">
-          <div class="tip-dim">SETUPS</div>
-          <div class="tip-val" style="font-size:1.4rem;">{len(ctx['setup_summary'])}</div>
+        <div style="display:inline-block;background:#0a0800;border:1px solid rgba(255,153,0,0.2);border-radius:2px;padding:8px 14px;margin:4px;text-align:center;font-family:'IBM Plex Mono',monospace;">
+          <div style="color:#666;font-size:0.78rem;">SETUPS</div>
+          <div style="color:#ffcc44;font-weight:600;" style="font-size:1.4rem;">{len(ctx['setup_summary'])}</div>
         </div>
       </div>
     </div>
@@ -2928,20 +2938,20 @@ def render_ai_research_tab():
             rows_html += f"""
             <div style="border-bottom:1px solid #ff990022;padding:6px 0;display:flex;justify-content:space-between;align-items:center;">
               <div>
-                <span class="tip-rank">{medal}</span>
+                <span style="color:#ff9900;font-weight:700;">{medal}</span>
                 <span style="color:#ddbb88;font-size:0.78rem;margin-left:6px;">{s[:18]}</span>
               </div>
               <div style="text-align:right;">
                 <span style="color:{col_s};font-weight:700;font-size:0.82rem;">{ap:+.1f}%</span>
-                <span class="tip-dim" style="margin-left:6px;">{wr_s:.0f}%WR {r_str}</span>
+                <span style="color:#666;font-size:0.78rem;" style="margin-left:6px;">{wr_s:.0f}%WR {r_str}</span>
               </div>
             </div>"""
 
         st.markdown(f"""
-        <div class="tip-terminal" style="min-height:280px;">
-          <div class="tip-header">◈ MODULE 01 ◈ SETUP RANKING</div>
+        <div style="background:#000;border:1px solid #ff9900;border-radius:4px;padding:20px;font-family:'IBM Plex Mono',monospace;" style="min-height:280px;">
+          <div style="font-family:'Orbitron',monospace;color:#ff9900;font-size:0.65rem;letter-spacing:3px;margin-bottom:12px;border-bottom:1px solid rgba(255,153,0,0.27);padding-bottom:8px;">◈ MODULE 01 ◈ SETUP RANKING</div>
           <div style="font-family:'IBM Plex Mono',monospace;font-size:0.75rem;">
-            {rows_html if rows_html else '<span class="tip-dim">數據不足</span>'}
+            {rows_html if rows_html else '<span style="color:#666;font-size:0.78rem;">數據不足</span>'}
           </div>
         </div>
         """, unsafe_allow_html=True)
@@ -2951,7 +2961,8 @@ def render_ai_research_tab():
                 result = _call_ai_research("找出最賺錢的Setup和原因，並給出具體改進建議", ctx, "setup")
                 st.session_state["ai_setup_result"] = result
         if st.session_state.get("ai_setup_result"):
-            st.markdown(f'<div class="tip-ai-output">{st.session_state["ai_setup_result"]}</div>',
+            _ai_txt = st.session_state["ai_setup_result"]
+            st.markdown(f'<div style="background:#050505;border:1px solid rgba(255,153,0,0.4);border-left:3px solid #ff9900;border-radius:3px;padding:16px 20px;font-family:IBM Plex Mono,monospace;font-size:0.8rem;color:#ccaa77;line-height:1.8;white-space:pre-wrap;margin-top:12px;">{_ai_txt}</div>',
                         unsafe_allow_html=True)
 
     # ══ 模組 2：最適市場環境 ══════════════════════════════════════════════════
@@ -2966,7 +2977,7 @@ def render_ai_research_tab():
             <div style="border-bottom:1px solid #ff990022;padding:5px 0;display:flex;justify-content:space-between;">
               <span style="color:#ddbb88;font-size:0.78rem;">{slot}</span>
               <span style="color:{c};font-weight:700;">{d['avg_pnl']:+.1f}%</span>
-              <span class="tip-dim">{d['win_rate']:.0f}%WR ×{d['n']}</span>
+              <span style="color:#666;font-size:0.78rem;">{d['win_rate']:.0f}%WR ×{d['n']}</span>
             </div>"""
 
         emo_rows = ""
@@ -2979,19 +2990,19 @@ def render_ai_research_tab():
             <div style="border-bottom:1px solid #ff990022;padding:4px 0;display:flex;justify-content:space-between;">
               <span style="color:#ddbb88;font-size:0.78rem;">{em}{warn}</span>
               <span style="color:{c};font-weight:700;">{d['win_rate']:.0f}%WR</span>
-              <span class="tip-dim">{d['avg_pnl']:+.1f}% ×{d['n']}</span>
+              <span style="color:#666;font-size:0.78rem;">{d['avg_pnl']:+.1f}% ×{d['n']}</span>
             </div>"""
 
         st.markdown(f"""
-        <div class="tip-terminal" style="min-height:280px;">
-          <div class="tip-header">◈ MODULE 02 ◈ MARKET ENV</div>
+        <div style="background:#000;border:1px solid #ff9900;border-radius:4px;padding:20px;font-family:'IBM Plex Mono',monospace;" style="min-height:280px;">
+          <div style="font-family:'Orbitron',monospace;color:#ff9900;font-size:0.65rem;letter-spacing:3px;margin-bottom:12px;border-bottom:1px solid rgba(255,153,0,0.27);padding-bottom:8px;">◈ MODULE 02 ◈ MARKET ENV</div>
           <div style="color:#ff990088;font-size:0.65rem;margin-bottom:4px;font-family:'IBM Plex Mono',monospace;">TIME SLOT PERFORMANCE</div>
           <div style="font-family:'IBM Plex Mono',monospace;font-size:0.75rem;margin-bottom:10px;">
-            {time_rows if time_rows else '<span class="tip-dim">需要時間數據</span>'}
+            {time_rows if time_rows else '<span style="color:#666;font-size:0.78rem;">需要時間數據</span>'}
           </div>
           <div style="color:#ff990088;font-size:0.65rem;margin-bottom:4px;font-family:'IBM Plex Mono',monospace;">EMOTION STATE ANALYSIS</div>
           <div style="font-family:'IBM Plex Mono',monospace;font-size:0.75rem;">
-            {emo_rows if emo_rows else '<span class="tip-dim">需要情緒記錄</span>'}
+            {emo_rows if emo_rows else '<span style="color:#666;font-size:0.78rem;">需要情緒記錄</span>'}
           </div>
         </div>
         """, unsafe_allow_html=True)
@@ -3001,7 +3012,8 @@ def render_ai_research_tab():
                 result = _call_ai_research("分析最適合的市場環境和交易時段，情緒管理建議", ctx, "market")
                 st.session_state["ai_market_result"] = result
         if st.session_state.get("ai_market_result"):
-            st.markdown(f'<div class="tip-ai-output">{st.session_state["ai_market_result"]}</div>',
+            _ai_txt = st.session_state["ai_market_result"]
+            st.markdown(f'<div style="background:#050505;border:1px solid rgba(255,153,0,0.4);border-left:3px solid #ff9900;border-radius:3px;padding:16px 20px;font-family:IBM Plex Mono,monospace;font-size:0.8rem;color:#ccaa77;line-height:1.8;white-space:pre-wrap;margin-top:12px;">{_ai_txt}</div>',
                         unsafe_allow_html=True)
 
     # ══ 模組 3：最佳倉位 ══════════════════════════════════════════════════════
@@ -3033,33 +3045,33 @@ def render_ai_research_tab():
             <div style="border-bottom:1px solid #ff990022;padding:5px 0;display:flex;justify-content:space-between;">
               <span style="color:#ddbb88;font-size:0.78rem;">{k}</span>
               <span style="color:{c};font-weight:700;">{d['avg_pnl']:+.1f}%</span>
-              <span class="tip-dim">×{d['n']}筆</span>
+              <span style="color:#666;font-size:0.78rem;">×{d['n']}筆</span>
             </div>"""
 
         st.markdown(f"""
-        <div class="tip-terminal" style="min-height:280px;">
-          <div class="tip-header">◈ MODULE 03 ◈ POSITION SIZING</div>
+        <div style="background:#000;border:1px solid #ff9900;border-radius:4px;padding:20px;font-family:'IBM Plex Mono',monospace;" style="min-height:280px;">
+          <div style="font-family:'Orbitron',monospace;color:#ff9900;font-size:0.65rem;letter-spacing:3px;margin-bottom:12px;border-bottom:1px solid rgba(255,153,0,0.27);padding-bottom:8px;">◈ MODULE 03 ◈ POSITION SIZING</div>
           <div style="color:#ff990088;font-size:0.65rem;margin-bottom:4px;font-family:'IBM Plex Mono',monospace;">SIZE vs PERFORMANCE</div>
           <div style="font-family:'IBM Plex Mono',monospace;font-size:0.75rem;margin-bottom:10px;">
-            {size_rows if size_rows else '<span class="tip-dim">需要倉位數據</span>'}
+            {size_rows if size_rows else '<span style="color:#666;font-size:0.78rem;">需要倉位數據</span>'}
           </div>
           <div style="color:#ff990088;font-size:0.65rem;margin-bottom:6px;font-family:'IBM Plex Mono',monospace;">KELLY CRITERION</div>
           <div style="font-family:'IBM Plex Mono',monospace;">
             <div style="display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px solid #ff990022;">
-              <span class="tip-dim">Full Kelly</span>
-              <span class="tip-val">{kelly_str}</span>
+              <span style="color:#666;font-size:0.78rem;">Full Kelly</span>
+              <span style="color:#ffcc44;font-weight:600;">{kelly_str}</span>
             </div>
             <div style="display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px solid #ff990022;">
-              <span class="tip-dim">Half Kelly (建議)</span>
-              <span class="tip-pos">{f'{half_kelly*100:.1f}%' if wins_all and loss_all else '—'}</span>
+              <span style="color:#666;font-size:0.78rem;">Half Kelly (建議)</span>
+              <span style="color:#00ff88;">{f'{half_kelly*100:.1f}%' if wins_all and loss_all else '—'}</span>
             </div>
             <div style="display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px solid #ff990022;">
-              <span class="tip-dim">當前風險設置</span>
-              <span class="tip-val">{risk_p}%</span>
+              <span style="color:#666;font-size:0.78rem;">當前風險設置</span>
+              <span style="color:#ffcc44;font-weight:600;">{risk_p}%</span>
             </div>
             <div style="display:flex;justify-content:space-between;padding:4px 0;">
-              <span class="tip-dim">建議單筆風險$</span>
-              <span class="tip-pos">${acct*risk_p/100:,.0f}</span>
+              <span style="color:#666;font-size:0.78rem;">建議單筆風險$</span>
+              <span style="color:#00ff88;">${acct*risk_p/100:,.0f}</span>
             </div>
           </div>
         </div>
@@ -3072,7 +3084,8 @@ def render_ai_research_tab():
                     ctx, "position")
                 st.session_state["ai_position_result"] = result
         if st.session_state.get("ai_position_result"):
-            st.markdown(f'<div class="tip-ai-output">{st.session_state["ai_position_result"]}</div>',
+            _ai_txt = st.session_state["ai_position_result"]
+            st.markdown(f'<div style="background:#050505;border:1px solid rgba(255,153,0,0.4);border-left:3px solid #ff9900;border-radius:3px;padding:16px 20px;font-family:IBM Plex Mono,monospace;font-size:0.8rem;color:#ccaa77;line-height:1.8;white-space:pre-wrap;margin-top:12px;">{_ai_txt}</div>',
                         unsafe_allow_html=True)
 
     # ── 綜合 AI 深度報告 ─────────────────────────────────────────────────────
@@ -3100,11 +3113,13 @@ def render_ai_research_tab():
             st.session_state["ai_deep_result"] = result
 
     if st.session_state.get("ai_deep_result"):
+        _deep_txt = st.session_state["ai_deep_result"]
+        _ts = datetime.now().strftime('%Y-%m-%d %H:%M')
         st.markdown(f"""
-        <div class="tip-terminal">
-          <div class="tip-header">◈ DEEP ANALYSIS REPORT ◈ {datetime.now().strftime('%Y-%m-%d %H:%M')}</div>
-          <div class="tip-ai-output" style="margin:0;border:none;border-left:2px solid #ff9900;">
-{st.session_state["ai_deep_result"]}
+        <div style="background:#000;border:1px solid #ff9900;border-radius:4px;padding:20px;font-family:IBM Plex Mono,monospace;">
+          <div style="font-family:Orbitron,monospace;color:#ff9900;font-size:0.65rem;letter-spacing:3px;margin-bottom:12px;border-bottom:1px solid rgba(255,153,0,0.27);padding-bottom:8px;">◈ DEEP ANALYSIS REPORT ◈ {_ts}</div>
+          <div style="background:#050505;border-left:3px solid #ff9900;padding:16px 20px;font-family:IBM Plex Mono,monospace;font-size:0.82rem;color:#ccaa77;line-height:1.9;white-space:pre-wrap;">
+{_deep_txt}
           </div>
         </div>
         """, unsafe_allow_html=True)

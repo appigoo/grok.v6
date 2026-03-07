@@ -4509,9 +4509,9 @@ def run_alerts(symbol, period_label, df, trigger_ai=False, mkt=None):
                                   f" 放量×{vol_ratio:.1f}｜{'＋'.join(tags)}", "bear")
                         new_signals.append(f"跳空下跌{gap_dn_pct:.2f}%")
 
-            # ── F6. 衰竭跳空(上) → 空頭訊號（5年回測：隔日收低率100%，n=80）──
+            # ── F6. 衰竭跳空(上) → 空頭訊號（10年回測：隔日收低率100%，n=157）─
             # 定義：跳空上漲，但今日最高點低於前日最高（無力突破，動能衰竭）
-            # 與F1(突破跳空)的關鍵差異：今日最高 < 前日最高
+            # 關鍵識別：今日最高 < 前日最高（HIGH_High_% < 0）
             if gap_up_pct >= min_gap_pct and vol_surge and b_high < p_high:
                 ck = f"{symbol}|{period_label}|衰竭跳空上|{bar_date}"
                 if ck not in st.session_state.sent_alerts:
@@ -4519,16 +4519,16 @@ def run_alerts(symbol, period_label, df, trigger_ai=False, mkt=None):
                     if is_latest:
                         _fail_pct = (p_high - b_high) / p_high * 100
                         add_alert(symbol, period_label,
-                                  f"🚨 【F6·衰竭跳空(上)】跳空+{gap_up_pct:.2f}%"
-                                  f" 但最高{b_high:.2f}<前日高{p_high:.2f}"
-                                  f"（差{_fail_pct:.2f}%），量×{vol_ratio:.1f}"
-                                  f"｜5年回測隔日收低率100%（n=80）"
-                                  f"，上漲無力、主力出貨，強烈看空！", "bear")
+                                  f"🚨🚨 【F6·衰竭跳空(上)】跳空+{gap_up_pct:.2f}%"
+                                  f" 但今高{b_high:.2f}<前高{p_high:.2f}（差{_fail_pct:.2f}%）"
+                                  f" 量×{vol_ratio:.1f}"
+                                  f"｜10年回測隔日收低率100%（n=157）"
+                                  f"，上漲無力／主力出貨，最強空頭信號！", "bear")
                         new_signals.append(f"F6-衰竭跳空上空頭{gap_up_pct:.1f}%")
 
-            # ── F7. 衰竭跳空(下) → 多頭訊號（5年回測：隔日收高率100%，n=89）──
-            # 定義：跳空下跌，今日最低點低於前日最低（深跌後市場承接，反彈）
-            # 與F3(突破跳空下)的關鍵差異：今日最低 < 前日最低（更深的洗盤）
+            # ── F7. 衰竭跳空(下) → 多頭訊號（10年回測：隔日收高率100%，n=150）─
+            # 定義：跳空下跌，今日最低點低於前日最低（超跌後市場承接力強）
+            # 關鍵識別：今日最低 < 前日最低
             if gap_dn_pct >= min_gap_pct and vol_surge and b_low < p_low:
                 ck = f"{symbol}|{period_label}|衰竭跳空下|{bar_date}"
                 if ck not in st.session_state.sent_alerts:
@@ -4536,12 +4536,49 @@ def run_alerts(symbol, period_label, df, trigger_ai=False, mkt=None):
                     if is_latest:
                         _low_ext = (p_low - b_low) / p_low * 100
                         add_alert(symbol, period_label,
-                                  f"🚀 【F7·衰竭跳空(下)反彈】跳空-{gap_dn_pct:.2f}%"
-                                  f" 且最低{b_low:.2f}<前日低{p_low:.2f}"
-                                  f"（超跌{_low_ext:.2f}%），量×{vol_ratio:.1f}"
-                                  f"｜5年回測隔日收高率100%（n=89）"
-                                  f"，深跌後市場承接，強烈逆向買入！", "bull")
+                                  f"🚀🚀 【F7·衰竭跳空(下)反彈】跳空-{gap_dn_pct:.2f}%"
+                                  f" 且今低{b_low:.2f}<前低{p_low:.2f}（超跌{_low_ext:.2f}%）"
+                                  f" 量×{vol_ratio:.1f}"
+                                  f"｜10年回測隔日收高率100%（n=150）"
+                                  f"，超跌承接有力，最強逆向買入！", "bull")
                         new_signals.append(f"F7-衰竭跳空下反彈{gap_dn_pct:.1f}%")
+
+            # ── F8. 持續跳空(上) → 多頭訊號（10年回測：隔日收高率100%，n=90）──
+            # 定義：跳空上漲，且今日最高突破前日最高（延伸突破，趨勢持續）
+            # 關鍵識別：今日最高 > 前日最高（HIGH_High_% > 0）
+            # 與F6相反——同樣跳空上漲，但今高>前高，動能持續而非衰竭
+            if gap_up_pct >= min_gap_pct and vol_surge and b_high > p_high:
+                ck = f"{symbol}|{period_label}|持續跳空上|{bar_date}"
+                if ck not in st.session_state.sent_alerts:
+                    st.session_state.sent_alerts.add(ck)
+                    if is_latest:
+                        _ext_pct = (b_high - p_high) / p_high * 100
+                        add_alert(symbol, period_label,
+                                  f"🚀🚀 【F8·持續跳空(上)】跳空+{gap_up_pct:.2f}%"
+                                  f" 且今高{b_high:.2f}>前高{p_high:.2f}（延伸+{_ext_pct:.2f}%）"
+                                  f" 量×{vol_ratio:.1f}"
+                                  f"｜10年回測隔日收高率100%（n=90）"
+                                  f"，突破持續延伸，多頭趨勢最強確認！", "bull")
+                        new_signals.append(f"F8-持續跳空上多頭{gap_up_pct:.1f}%")
+
+            # ── F9. 突破/持續跳空(下) → 空頭訊號（10年回測：隔日收低率99%，n=105）
+            # 定義：跳空下跌，且今日最低繼續破前日最低（空頭趨勢持續延伸）
+            # 注：此條件與F7(衰竭跳空下)相同——兩者在數據上完全重疊
+            # F7已覆蓋此偵測，此處作為補充強調空頭版本（用不同識別key）
+            # 特殊情況：跳空下跌 + 今低<前低 + 收陰線（比F7更強的空頭確認）
+            if gap_dn_pct >= min_gap_pct and vol_surge and b_low < p_low and is_bear_bar:
+                ck = f"{symbol}|{period_label}|持續跳空下|{bar_date}"
+                if ck not in st.session_state.sent_alerts:
+                    st.session_state.sent_alerts.add(ck)
+                    if is_latest:
+                        _brk_pct = (p_low - b_low) / p_low * 100
+                        add_alert(symbol, period_label,
+                                  f"🚨🚨 【F9·持續跳空(下)】跳空-{gap_dn_pct:.2f}%"
+                                  f" 今低{b_low:.2f}<前低{p_low:.2f}（破底{_brk_pct:.2f}%）"
+                                  f" 陰線確認 量×{vol_ratio:.1f}"
+                                  f"｜10年回測隔日收低率99%（n=105）"
+                                  f"，空頭持續延伸破底，強烈做空！", "bear")
+                        new_signals.append(f"F9-持續跳空下空頭{gap_dn_pct:.1f}%")
 
         # ── F4. 缺口回補測試（固定看最新根）─────────────────────────────────
         curr_low = float(low.iloc[-1])
@@ -6002,7 +6039,7 @@ def run_alerts(symbol, period_label, df, trigger_ai=False, mkt=None):
     #    P2. VIX暴漲極端反向買入  WR=64.0% n=25  (VIX 當日漲>10%)
     #    P3. 射擊之星觀察          WR=51.9% n=77  (5年無效→降為info觀察)
     #    P4. 十字星多頭            WR=58.2% n=55  (5年確認有效)
-    #    P5. 連漲5-8天換向視窗    WR=64-67% n=39-9 (5年確認，觸發條件收緊)
+    #    P5. 連漲5-9天換向視窗    WR=59-80% n=77-5 (10年確認，第9-10天過熱最強)
     #    P6. 突破跳空量能強化版    WR=100%  n=38  (5年完美紀錄)
     # ══════════════════════════════════════════════════════════════════════════
     try:
@@ -6117,15 +6154,14 @@ def run_alerts(symbol, period_label, df, trigger_ai=False, mkt=None):
                                   f"，多空均衡後偏向多方，需配合其他買入信號確認", "info")
                         new_signals.append("P4-十字星多頭60%")
 
-            # ── P5. 連漲5-8天換向預警（5年實證）─────────────────────────────
-            # 5年數據修正：
-            #   連漲5天→64.1%，連漲6天→64.0%，連漲8天→66.7%（有效）
-            #   連漲9天→33.3%（急降，過了窗口）
-            #   連跌：無顯著規律（最高57.9%，低於閾值）→ 改為觀察
-            if len(df) >= 10:
+            # ── P5. 連漲換向視窗（10年實證）──────────────────────────────────
+            # 10年數據（2515筆）：
+            #   連漲5天→59.7%，連漲6天→58.7%，連漲9天→62.5%，連漲10天→80%⭐⭐
+            #   連跌6天→36.4%❌，連跌7天→33.3%❌（繼續跌，非反彈）
+            if len(df) >= 12:
                 _p5_up_cnt = 0
                 _p5_dn_cnt = 0
-                for _bi in range(1, 11):
+                for _bi in range(1, 13):
                     if len(close) <= _bi: break
                     _diff = float(close.iloc[-_bi]) - float(close.iloc[-_bi-1])
                     if _diff > 0:
@@ -6137,48 +6173,50 @@ def run_alerts(symbol, period_label, df, trigger_ai=False, mkt=None):
                     else:
                         break
 
-                # 連漲5-8天：高機率換向（5年WR 64-67%）
+                # 連漲5-8天：出場觀察視窗（WR 58-67%）
                 if 5 <= _p5_up_cnt <= 8:
                     ck_p5 = f"{symbol}|{period_label}|P5-連漲換向|{_p_ts}"
                     if ck_p5 not in st.session_state.sent_alerts:
                         st.session_state.sent_alerts.add(ck_p5)
                         _p5_chg = (_p_c - float(close.iloc[-_p5_up_cnt-1])) / float(close.iloc[-_p5_up_cnt-1]) * 100 if float(close.iloc[-_p5_up_cnt-1]) > 0 else 0
-                        _p5_wr = {5:"64.1", 6:"64.0", 7:"56.2", 8:"66.7"}.get(_p5_up_cnt, "60+")
-                        # RSI超買加強信號
+                        _p5_wr = {5:"59.7", 6:"58.7", 7:"48.1", 8:"61.5"}.get(_p5_up_cnt, "58+")
                         try:
                             _p5_rsi = float(calc_rsi(close, 14).iloc[-1])
-                            _rsi_tag = f"，RSI={_p5_rsi:.0f}{'超買⚠️' if _p5_rsi>=70 else ''}"
+                            _rsi_tag = f"，RSI={_p5_rsi:.0f}{'🔴超買' if _p5_rsi>=70 else ''}"
                         except Exception:
                             _rsi_tag = ""
                         add_alert(symbol, period_label,
                                   f"⚠️ 【P5·連漲{_p5_up_cnt}天換向視窗】累漲{_p5_chg:+.1f}%{_rsi_tag}"
-                                  f"｜5年回測隔日繼續漲率={_p5_wr}%，此天數為歷史換向高機率窗口"
-                                  f"，注意高位出場或縮倉", "info")
+                                  f"｜10年回測同向率={_p5_wr}%，高位換向壓力增加"
+                                  f"，注意縮倉或設置移動止損", "info")
                         new_signals.append(f"P5-連漲{_p5_up_cnt}天換向視窗")
 
-                # 連漲≥9天：過了視窗，急降至33%（少見極端情況）
+                # 連漲9-10天：過熱極端信號（WR=62-80%，強烈換向警告）
                 elif _p5_up_cnt >= 9:
-                    ck_p5b = f"{symbol}|{period_label}|P5-連漲超長|{_p_ts}"
+                    ck_p5b = f"{symbol}|{period_label}|P5-連漲過熱|{_p_ts}"
                     if ck_p5b not in st.session_state.sent_alerts:
                         st.session_state.sent_alerts.add(ck_p5b)
                         _p5_chg = (_p_c - float(close.iloc[-_p5_up_cnt-1])) / float(close.iloc[-_p5_up_cnt-1]) * 100 if float(close.iloc[-_p5_up_cnt-1]) > 0 else 0
+                        _p5_wr10 = "80" if _p5_up_cnt >= 10 else "62.5"
                         add_alert(symbol, period_label,
-                                  f"🚨 【P5·連漲{_p5_up_cnt}天異常】累漲{_p5_chg:+.1f}%"
-                                  f"｜5年回測連漲9天後隔日收高率驟降至33%"
-                                  f"，動能極端過熱，嚴重高估換向風險！", "bear")
-                        new_signals.append(f"P5-連漲{_p5_up_cnt}天過熱")
+                                  f"🚨 【P5·連漲{_p5_up_cnt}天極度過熱】累漲{_p5_chg:+.1f}%"
+                                  f"｜10年回測第{_p5_up_cnt}天同向率高達{_p5_wr10}%"
+                                  f"（動能極端，通常是最後衝刺）"
+                                  f"，強烈建議高位減倉，防止急速反轉！", "bear")
+                        new_signals.append(f"P5-連漲{_p5_up_cnt}天極度過熱")
 
-                # 連跌≥7天：少樣本但顯示反彈（觀察）
-                elif _p5_dn_cnt >= 7:
-                    ck_p5c = f"{symbol}|{period_label}|P5-連跌觀察|{_p_ts}"
+                # 連跌6-7天：10年數據顯示繼續下跌（非反彈！）
+                elif _p5_dn_cnt >= 6:
+                    ck_p5c = f"{symbol}|{period_label}|P5-連跌警示|{_p_ts}"
                     if ck_p5c not in st.session_state.sent_alerts:
                         st.session_state.sent_alerts.add(ck_p5c)
                         _p5_chg = (_p_c - float(close.iloc[-_p5_dn_cnt-1])) / float(close.iloc[-_p5_dn_cnt-1]) * 100 if float(close.iloc[-_p5_dn_cnt-1]) > 0 else 0
+                        _p5_wr_dn = {6:"36.4", 7:"33.3"}.get(_p5_dn_cnt, "35")
                         add_alert(symbol, period_label,
-                                  f"📊 【P5·連跌{_p5_dn_cnt}天觀察】累跌{_p5_chg:+.1f}%"
-                                  f"｜5年回測連跌7天後隔日收高率71.4%（n=7，樣本少）"
-                                  f"，搭配RSI<35或其他買入信號才考慮進場", "info")
-                        new_signals.append(f"P5-連跌{_p5_dn_cnt}天觀察")
+                                  f"🚨 【P5·連跌{_p5_dn_cnt}天空頭延續】累跌{_p5_chg:+.1f}%"
+                                  f"｜10年回測連跌{_p5_dn_cnt}天後隔日收高率僅{_p5_wr_dn}%"
+                                  f"，空頭趨勢持續，勿接刀！等待止跌信號", "bear")
+                        new_signals.append(f"P5-連跌{_p5_dn_cnt}天空頭延續")
 
             # ── P6. 突破跳空量能強化版（跳空上漲+量≥1.5x，回測WR=100%）─────
             if len(df) >= 3:

@@ -1431,12 +1431,29 @@ def render_social_sentiment(symbol: str):
 # 指標：P/C Ratio、IV、最大痛點、到期日分佈、大額流向
 # ══════════════════════════════════════════════════════════════════════════════
 
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=600)
 def fetch_options_data(symbol: str) -> dict:
-    """抓取期權數據，回傳整合分析結果"""
+    """抓取期權數據，回傳整合分析結果（TTL=10分鐘，避免rate limit）"""
+    import time as _time
     try:
         t = yf.Ticker(symbol)
-        exp_dates = t.options
+
+        # Retry 最多3次，每次等待間隔遞增
+        exp_dates = None
+        for _attempt in range(3):
+            try:
+                exp_dates = t.options
+                break
+            except Exception as _e:
+                if "Too Many Requests" in str(_e) or "Rate" in str(_e):
+                    if _attempt < 2:
+                        _time.sleep(2 + _attempt * 2)
+                        t = yf.Ticker(symbol)  # 重建 Ticker
+                    else:
+                        return {"error": "rate_limit"}
+                else:
+                    return {"error": str(_e)[:80]}
+
         if not exp_dates:
             return {"error": "no_options"}
 
@@ -1449,13 +1466,15 @@ def fetch_options_data(symbol: str) -> dict:
         except Exception:
             pass
 
-        target_dates = exp_dates[:min(8, len(exp_dates))]
+        # 只抓前5個到期日（減少請求數量，降低 rate limit 風險）
+        target_dates = exp_dates[:min(5, len(exp_dates))]
         all_calls = []
         all_puts  = []
         by_expiry = []
 
         for exp in target_dates:
             try:
+                _time.sleep(0.3)   # 每次請求間隔 0.3 秒，避免觸發 rate limit
                 chain  = t.option_chain(exp)
                 calls  = chain.calls.copy()
                 puts   = chain.puts.copy()
@@ -1488,7 +1507,9 @@ def fetch_options_data(symbol: str) -> dict:
                 })
                 all_calls.append(calls)
                 all_puts.append(puts)
-            except Exception:
+            except Exception as _ec:
+                if "Too Many Requests" in str(_ec) or "Rate" in str(_ec):
+                    break   # rate limit 時停止繼續請求，用已抓到的數據
                 continue
 
         if not by_expiry:
@@ -1588,20 +1609,42 @@ def fetch_options_data(symbol: str) -> dict:
             "pc_vol":pc_vol_total,"pc_oi":pc_oi_total,
             "atm_iv":atm_iv_avg,"iv_skew":iv_skew,"max_pain":max_pain,
             "top_trades":top_trades,"signal":signal,"signal_reasons":signal_reasons,
+            "covered_dates": len(by_expiry),
         }
     except Exception as e:
-        return {"error": str(e)[:80]}
+        err_str = str(e)
+        if "Too Many Requests" in err_str or "Rate" in err_str:
+            return {"error": "rate_limit"}
+        return {"error": err_str[:80]}
 
 
 def render_options_panel(symbol: str):
     """期權數據面板 — P/C Ratio、IV、最大痛點、流向、到期日分佈"""
-    with st.spinner(f"載入 {symbol} 期權數據..."):
+    with st.spinner(f"載入 {symbol} 期權數據（最多約5秒）..."):
         data = fetch_options_data(symbol)
 
     if "error" in data:
         err = data["error"]
-        msg = {"no_options":"此股票無期權市場（通常為小型股）","empty_chain":"期權鏈數據為空，請稍後再試"}.get(err,f"載入失敗：{err}")
-        st.markdown(f'<div style="background:#1a2535;border:1px solid #334;border-radius:8px;padding:16px;color:#556;font-size:0.85rem;">🔒 {msg}</div>',unsafe_allow_html=True)
+        if err == "rate_limit":
+            st.markdown(
+                '<div style="background:#1a2030;border:1px solid #445;border-radius:8px;padding:16px;">'
+                '<div style="color:#ffaa44;font-size:0.9rem;font-weight:600;margin-bottom:6px;">⏳ Yahoo Finance 請求過於頻繁</div>'
+                '<div style="color:#8899aa;font-size:0.8rem;">yfinance 免費 API 有速率限制，期權數據已快取10分鐘。</div>'
+                '<div style="color:#8899aa;font-size:0.8rem;margin-top:4px;">請等待 <b style="color:#ffcc44;">1-2 分鐘</b> 後點擊「強制刷新數據快取」再試，或繼續使用其他面板。</div>'
+                '</div>',
+                unsafe_allow_html=True)
+            if st.button(f"🔄 清除期權快取並重試 ({symbol})", key=f"opt_retry_{symbol}"):
+                fetch_options_data.clear()
+                st.rerun()
+        else:
+            msg = {
+                "no_options": "此股票無期權市場（通常為小型股）",
+                "empty_chain": "期權鏈數據為空，請稍後再試",
+            }.get(err, f"載入失敗：{err}")
+            st.markdown(
+                f'<div style="background:#1a2535;border:1px solid #334;border-radius:8px;'
+                f'padding:16px;color:#667788;font-size:0.85rem;">🔒 {msg}</div>',
+                unsafe_allow_html=True)
         return
 
     spot=data.get("spot"); pc_vol=data.get("pc_vol"); pc_oi=data.get("pc_oi")

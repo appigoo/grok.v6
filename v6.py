@@ -1426,6 +1426,269 @@ def render_social_sentiment(symbol: str):
             st.markdown("".join(parts), unsafe_allow_html=True)
 
 # ══════════════════════════════════════════════════════════════════════════════
+# Options Flow 期權數據面板
+# 數據來源：yfinance option_chain（免費，延遲約15分鐘）
+# 指標：P/C Ratio、IV、最大痛點、到期日分佈、大額流向
+# ══════════════════════════════════════════════════════════════════════════════
+
+@st.cache_data(ttl=300)
+def fetch_options_data(symbol: str) -> dict:
+    """抓取期權數據，回傳整合分析結果"""
+    try:
+        t = yf.Ticker(symbol)
+        exp_dates = t.options
+        if not exp_dates:
+            return {"error": "no_options"}
+
+        spot = None
+        try:
+            hist = yf.download(symbol, period="2d", interval="1d",
+                               auto_adjust=True, progress=False, multi_level_col=False)
+            if not hist.empty:
+                spot = float(hist["Close"].iloc[-1])
+        except Exception:
+            pass
+
+        target_dates = exp_dates[:min(8, len(exp_dates))]
+        all_calls = []
+        all_puts  = []
+        by_expiry = []
+
+        for exp in target_dates:
+            try:
+                chain  = t.option_chain(exp)
+                calls  = chain.calls.copy()
+                puts   = chain.puts.copy()
+                calls["expiry"] = exp
+                puts["expiry"]  = exp
+                calls = calls[(calls["volume"].fillna(0) > 0) | (calls["openInterest"].fillna(0) > 0)]
+                puts  = puts[ (puts["volume"].fillna(0)  > 0) | (puts["openInterest"].fillna(0) > 0)]
+
+                c_vol  = int(calls["volume"].fillna(0).sum())
+                p_vol  = int(puts["volume"].fillna(0).sum())
+                c_oi   = int(calls["openInterest"].fillna(0).sum())
+                p_oi   = int(puts["openInterest"].fillna(0).sum())
+                c_prem = float((calls["lastPrice"].fillna(0) * calls["volume"].fillna(0)).sum())
+                p_prem = float((puts["lastPrice"].fillna(0)  * puts["volume"].fillna(0)).sum())
+
+                atm_iv_c = atm_iv_p = None
+                if spot:
+                    c_s = calls.copy(); c_s["dist"] = abs(c_s["strike"] - spot)
+                    iv_c = c_s.nsmallest(3,"dist")["impliedVolatility"].dropna()
+                    if len(iv_c) > 0: atm_iv_c = float(iv_c.mean()) * 100
+                    p_s = puts.copy(); p_s["dist"] = abs(p_s["strike"] - spot)
+                    iv_p = p_s.nsmallest(3,"dist")["impliedVolatility"].dropna()
+                    if len(iv_p) > 0: atm_iv_p = float(iv_p.mean()) * 100
+
+                by_expiry.append({
+                    "expiry":exp,"c_vol":c_vol,"p_vol":p_vol,"c_oi":c_oi,"p_oi":p_oi,
+                    "c_prem":c_prem,"p_prem":p_prem,"atm_iv_c":atm_iv_c,"atm_iv_p":atm_iv_p,
+                    "pc_vol": round(p_vol/c_vol,2) if c_vol>0 else None,
+                    "pc_oi":  round(p_oi/c_oi,2)  if c_oi>0  else None,
+                })
+                all_calls.append(calls)
+                all_puts.append(puts)
+            except Exception:
+                continue
+
+        if not by_expiry:
+            return {"error": "empty_chain"}
+
+        tot_c_vol  = sum(e["c_vol"]  for e in by_expiry)
+        tot_p_vol  = sum(e["p_vol"]  for e in by_expiry)
+        tot_c_oi   = sum(e["c_oi"]   for e in by_expiry)
+        tot_p_oi   = sum(e["p_oi"]   for e in by_expiry)
+        tot_c_prem = sum(e["c_prem"] for e in by_expiry)
+        tot_p_prem = sum(e["p_prem"] for e in by_expiry)
+        pc_vol_total = round(tot_p_vol/tot_c_vol,3) if tot_c_vol>0 else None
+        pc_oi_total  = round(tot_p_oi/tot_c_oi,3)  if tot_c_oi>0  else None
+
+        atm_iv_avg = None
+        if by_expiry[0]["atm_iv_c"] and by_expiry[0]["atm_iv_p"]:
+            atm_iv_avg = round((by_expiry[0]["atm_iv_c"] + by_expiry[0]["atm_iv_p"]) / 2, 1)
+
+        iv_skew = None
+        try:
+            df_c2 = pd.concat(all_calls[:2]) if all_calls else pd.DataFrame()
+            df_p2 = pd.concat(all_puts[:2])  if all_puts  else pd.DataFrame()
+            if spot and not df_c2.empty and not df_p2.empty:
+                otm_c = df_c2[df_c2["strike"] > spot*1.05]["impliedVolatility"].dropna()
+                otm_p = df_p2[df_p2["strike"] < spot*0.95]["impliedVolatility"].dropna()
+                if len(otm_c) >= 3 and len(otm_p) >= 3:
+                    iv_skew = round((float(otm_p.mean()) - float(otm_c.mean())) * 100, 1)
+        except Exception:
+            pass
+
+        max_pain = None
+        try:
+            df_cm = pd.concat(all_calls[:3]) if all_calls else pd.DataFrame()
+            df_pm = pd.concat(all_puts[:3])  if all_puts  else pd.DataFrame()
+            if not df_cm.empty and not df_pm.empty:
+                strikes = sorted(set(df_cm["strike"].tolist() + df_pm["strike"].tolist()))
+                pain_vals = []
+                for sp in strikes:
+                    cp = float(((df_cm["strike"]-sp).clip(lower=0)*df_cm["openInterest"].fillna(0)).sum())
+                    pp = float(((sp-df_pm["strike"]).clip(lower=0)*df_pm["openInterest"].fillna(0)).sum())
+                    pain_vals.append((sp, cp+pp))
+                if pain_vals:
+                    max_pain = min(pain_vals, key=lambda x: x[1])[0]
+        except Exception:
+            pass
+
+        top_trades = []
+        try:
+            all_rows = []
+            for idx in range(min(4, len(all_calls), len(all_puts))):
+                c2 = all_calls[idx].copy(); c2["type"] = "CALL"
+                p2 = all_puts[idx].copy();  p2["type"] = "PUT"
+                all_rows += [c2, p2]
+            if all_rows:
+                comb = pd.concat(all_rows)
+                comb["premium"] = comb["lastPrice"].fillna(0)*comb["volume"].fillna(0)*100
+                comb = comb[comb["premium"]>0].sort_values("premium",ascending=False)
+                for _, row in comb.head(6).iterrows():
+                    top_trades.append({
+                        "type":row["type"],"strike":float(row["strike"]),
+                        "expiry":str(row["expiry"]),
+                        "premium":float(row["premium"]),
+                        "volume":int(row["volume"]) if not pd.isna(row["volume"]) else 0,
+                        "oi":int(row["openInterest"]) if not pd.isna(row["openInterest"]) else 0,
+                        "iv":round(float(row["impliedVolatility"])*100,1) if not pd.isna(row["impliedVolatility"]) else None,
+                        "itm":bool(row.get("inTheMoney",False)),
+                    })
+        except Exception:
+            pass
+
+        signal = "neutral"
+        signal_reasons = []
+        if pc_vol_total is not None:
+            if pc_vol_total < 0.6:   signal="bull"; signal_reasons.append(f"P/C成交量={pc_vol_total:.2f}（<0.6 強烈偏多）")
+            elif pc_vol_total < 0.8: signal_reasons.append(f"P/C成交量={pc_vol_total:.2f}（偏多）")
+            elif pc_vol_total > 1.2: signal="bear"; signal_reasons.append(f"P/C成交量={pc_vol_total:.2f}（>1.2 強烈偏空）")
+            elif pc_vol_total > 1.0: signal_reasons.append(f"P/C成交量={pc_vol_total:.2f}（偏空）")
+            else:                    signal_reasons.append(f"P/C成交量={pc_vol_total:.2f}（中性）")
+        if iv_skew is not None:
+            if iv_skew>10:   signal_reasons.append(f"IV Skew=+{iv_skew:.1f}%（市場防跌保護需求高，偏空）")
+            elif iv_skew>5:  signal_reasons.append(f"IV Skew=+{iv_skew:.1f}%（輕微偏空）")
+            elif iv_skew<-5: signal_reasons.append(f"IV Skew={iv_skew:.1f}%（Call溢價>Put，偏多）")
+            else:            signal_reasons.append(f"IV Skew={iv_skew:.1f}%（均衡）")
+        if tot_c_prem>0 and tot_p_prem>0:
+            pr = tot_p_prem/tot_c_prem
+            if pr<0.7:   signal_reasons.append(f"權利金：Call ${tot_c_prem/1e6:.1f}M >> Put ${tot_p_prem/1e6:.1f}M（資金流向多頭）")
+            elif pr>1.3: signal_reasons.append(f"權利金：Put ${tot_p_prem/1e6:.1f}M >> Call ${tot_c_prem/1e6:.1f}M（資金流向空頭）")
+            else:        signal_reasons.append(f"權利金：Call ${tot_c_prem/1e6:.1f}M / Put ${tot_p_prem/1e6:.1f}M（均衡）")
+        if max_pain and spot:
+            mp_diff=(max_pain-spot)/spot*100
+            signal_reasons.append(f"最大痛點 ${max_pain:.0f}（較現價 {mp_diff:+.1f}%）")
+
+        return {
+            "spot":spot,"exp_dates":list(target_dates),"by_expiry":by_expiry,
+            "tot_c_vol":tot_c_vol,"tot_p_vol":tot_p_vol,"tot_c_oi":tot_c_oi,"tot_p_oi":tot_p_oi,
+            "tot_c_prem":tot_c_prem,"tot_p_prem":tot_p_prem,
+            "pc_vol":pc_vol_total,"pc_oi":pc_oi_total,
+            "atm_iv":atm_iv_avg,"iv_skew":iv_skew,"max_pain":max_pain,
+            "top_trades":top_trades,"signal":signal,"signal_reasons":signal_reasons,
+        }
+    except Exception as e:
+        return {"error": str(e)[:80]}
+
+
+def render_options_panel(symbol: str):
+    """期權數據面板 — P/C Ratio、IV、最大痛點、流向、到期日分佈"""
+    with st.spinner(f"載入 {symbol} 期權數據..."):
+        data = fetch_options_data(symbol)
+
+    if "error" in data:
+        err = data["error"]
+        msg = {"no_options":"此股票無期權市場（通常為小型股）","empty_chain":"期權鏈數據為空，請稍後再試"}.get(err,f"載入失敗：{err}")
+        st.markdown(f'<div style="background:#1a2535;border:1px solid #334;border-radius:8px;padding:16px;color:#556;font-size:0.85rem;">🔒 {msg}</div>',unsafe_allow_html=True)
+        return
+
+    spot=data.get("spot"); pc_vol=data.get("pc_vol"); pc_oi=data.get("pc_oi")
+    atm_iv=data.get("atm_iv"); iv_skew=data.get("iv_skew"); max_pain=data.get("max_pain")
+    signal=data.get("signal","neutral"); reasons=data.get("signal_reasons",[])
+    sig_color={"bull":"#00ee66","bear":"#ff4444","neutral":"#aabb88"}[signal]
+    sig_icon={"bull":"🐂","bear":"🐻","neutral":"⚖️"}[signal]
+    sig_label={"bull":"偏多","bear":"偏空","neutral":"中性"}[signal]
+
+    def _mc(col,title,value,sub="",color="#ccd6ee",warn=""):
+        with col:
+            st.markdown(
+                f'<div style="background:#111e2e;border:1px solid #223344;border-radius:8px;padding:12px 10px;text-align:center;">' +
+                f'<div style="font-size:0.72rem;color:#5577aa;margin-bottom:4px;">{title}</div>' +
+                f'<div style="font-size:1.3rem;font-weight:700;color:{color};">{value}</div>' +
+                f'<div style="font-size:0.7rem;color:#6688aa;margin-top:2px;">{sub}</div>' +
+                (f'<div style="font-size:0.68rem;color:#ffaa44;margin-top:3px;">{warn}</div>' if warn else "") +
+                '</div>', unsafe_allow_html=True)
+
+    c1,c2,c3,c4,c5 = st.columns(5)
+    if pc_vol is not None:
+        pc_c="#00ee66" if pc_vol<0.8 else ("#ff4444" if pc_vol>1.2 else "#ffcc44")
+        _mc(c1,"P/C 成交量比",f"{pc_vol:.2f}",f"C:{data['tot_c_vol']//1000}K P:{data['tot_p_vol']//1000}K",pc_c,"偏多" if pc_vol<0.8 else ("偏空" if pc_vol>1.2 else "中性"))
+    else: _mc(c1,"P/C 成交量比","N/A","","#445566")
+    if pc_oi is not None:
+        oi_c="#00ee66" if pc_oi<0.8 else ("#ff4444" if pc_oi>1.2 else "#ffcc44")
+        _mc(c2,"P/C 未平倉比",f"{pc_oi:.2f}",f"C:{data['tot_c_oi']//1000}K P:{data['tot_p_oi']//1000}K",oi_c)
+    else: _mc(c2,"P/C 未平倉比","N/A","","#445566")
+    if atm_iv is not None:
+        iv_c="#ff6644" if atm_iv>80 else ("#ffaa44" if atm_iv>60 else ("#ffcc44" if atm_iv>40 else "#00cc99"))
+        _mc(c3,"ATM IV（近月）",f"{atm_iv:.1f}%","隱含波動率",iv_c,"極高恐慌" if atm_iv>80 else ("高波動" if atm_iv>60 else ("偏高" if atm_iv>40 else "正常")))
+    else: _mc(c3,"ATM IV（近月）","N/A","","#445566")
+    if iv_skew is not None:
+        sk_c="#ff4444" if iv_skew>8 else ("#ffcc44" if iv_skew>3 else ("#00ee66" if iv_skew<-3 else "#aabbcc"))
+        _mc(c4,"IV Skew（Put-Call）",f"{iv_skew:+.1f}%","OTM Put-Call IV",sk_c,"防護需求↑" if iv_skew>5 else ("Call溢價↑" if iv_skew<-5 else "均衡"))
+    else: _mc(c4,"IV Skew","N/A","","#445566")
+    if max_pain is not None and spot:
+        mp_d=(max_pain-spot)/spot*100
+        _mc(c5,"最大痛點",f"${max_pain:.0f}",f"現價${spot:.0f}（{mp_d:+.1f}%）","#aaffcc" if abs(mp_d)<3 else ("#ffaa44" if abs(mp_d)<8 else "#ff6644"))
+    else: _mc(c5,"最大痛點","N/A","","#445566")
+
+    st.markdown("<div style='height:10px'></div>",unsafe_allow_html=True)
+    col_s,col_e = st.columns([1,1])
+
+    with col_s:
+        rh="".join(f'<div style="padding:3px 0;border-bottom:1px solid #1e2e3e;font-size:0.78rem;color:#99aacc;">• {r}</div>' for r in reasons)
+        st.markdown(
+            f'<div style="background:#0e1e2e;border:1px solid {sig_color}44;border-radius:8px;padding:14px;">' +
+            f'<div style="font-size:0.85rem;font-weight:700;color:{sig_color};margin-bottom:8px;">{sig_icon} 期權流向信號：{sig_label}</div>' +
+            rh + '<div style="font-size:0.68rem;color:#446;margin-top:8px;">⚠️ 期權為附加信號，需配合技術面確認。高P/C可能是對沖而非純空頭。</div></div>',
+            unsafe_allow_html=True)
+
+    with col_e:
+        by_exp=data.get("by_expiry",[])
+        if by_exp:
+            rows=[]
+            for e in by_exp[:6]:
+                pc=f"{e['pc_vol']:.2f}" if e["pc_vol"] else "—"
+                pc_c="#00ee66" if (e["pc_vol"] and e["pc_vol"]<0.8) else ("#ff4444" if (e["pc_vol"] and e["pc_vol"]>1.2) else "#ffcc44")
+                iv_s=f"{e['atm_iv_c']:.0f}%" if e["atm_iv_c"] else "—"
+                rows.append(f'<tr><td style="color:#aabbcc;padding:3px 6px;">{e["expiry"][5:]}</td><td style="color:#66aaff;text-align:right;padding:3px 6px;">{e["c_vol"]:,}</td><td style="color:#ff6666;text-align:right;padding:3px 6px;">{e["p_vol"]:,}</td><td style="color:{pc_c};text-align:right;padding:3px 6px;">{pc}</td><td style="color:#aacc88;text-align:right;padding:3px 6px;">{iv_s}</td></tr>')
+            st.markdown(
+                '<div style="background:#0e1e2e;border:1px solid #223;border-radius:8px;padding:12px;">' +
+                '<div style="font-size:0.8rem;font-weight:700;color:#7799cc;margin-bottom:8px;">📅 各到期日期權分佈</div>' +
+                '<table style="width:100%;border-collapse:collapse;font-size:0.75rem;">' +
+                '<tr style="color:#556677;border-bottom:1px solid #223;"><th style="text-align:left;padding:3px 6px;">到期日</th><th style="text-align:right;padding:3px 6px;">Call量</th><th style="text-align:right;padding:3px 6px;">Put量</th><th style="text-align:right;padding:3px 6px;">P/C</th><th style="text-align:right;padding:3px 6px;">ATM IV</th></tr>' +
+                "".join(rows) + '</table></div>', unsafe_allow_html=True)
+
+    top=data.get("top_trades",[])
+    if top:
+        st.markdown('<div style="font-size:0.8rem;font-weight:700;color:#7799cc;margin:10px 0 4px;">💰 大額期權流向（依保費規模排序）</div>',unsafe_allow_html=True)
+        cards=[]
+        for tr in top:
+            ic=tr["type"]=="CALL"
+            bg="#0d2010" if ic else "#200d0d"; bd="#00aa44" if ic else "#aa2222"
+            ti="📈 CALL" if ic else "📉 PUT"
+            itm='<span style="background:#335;color:#aaf;font-size:0.65rem;padding:1px 4px;border-radius:3px;margin-left:4px;">ITM</span>' if tr["itm"] else ""
+            pm=tr["premium"]/1e6; ps=f"${pm:.2f}M" if pm>=0.1 else f"${tr['premium']/1e3:.0f}K"
+            iv_s=f"IV {tr['iv']:.0f}%" if tr["iv"] else ""
+            cards.append(f'<div style="background:{bg};border:1px solid {bd}44;border-radius:6px;padding:10px 12px;flex:1;min-width:140px;"><div style="font-size:0.8rem;font-weight:700;color:{"#00cc55" if ic else "#ee3333"};">{ti}{itm}</div><div style="font-size:1.0rem;font-weight:700;color:#eef;margin:4px 0;">Strike ${tr["strike"]:.0f}</div><div style="font-size:0.72rem;color:#8899aa;">{tr["expiry"][5:]}</div><div style="font-size:0.78rem;color:#ffcc44;font-weight:600;margin-top:4px;">{ps}</div><div style="font-size:0.7rem;color:#667788;">Vol {tr["volume"]:,} · OI {tr["oi"]:,} · {iv_s}</div></div>')
+        for row in [cards[:3],cards[3:6]]:
+            if row: st.markdown(f'<div style="display:flex;gap:8px;margin-bottom:6px;">'+"".join(row)+"</div>",unsafe_allow_html=True)
+
+    st.markdown('<div style="font-size:0.68rem;color:#334455;margin-top:8px;">數據來源：Yahoo Finance Options（約15分鐘延遲）｜高P/C可能包含機構對沖部位</div>',unsafe_allow_html=True)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # AI 技術分析模組
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -7233,6 +7496,15 @@ def render_single(symbol, interval, show_alerts, max_bars=90, show_pre=False, sh
     unsafe_allow_html=True)
         render_social_sentiment(symbol)
 
+    # Options Flow panel
+    if show_options:
+        st.markdown("---")
+        st.markdown(
+            '<div style="font-size:1.05rem;font-weight:700;color:#7799cc;margin-bottom:8px;">'
+            '📊 Options Flow 期權數據</div>',
+            unsafe_allow_html=True)
+        render_options_panel(symbol)
+
 # ══════════════════════════════════════════════════════════════════════════════
 # Sidebar
 # ══════════════════════════════════════════════════════════════════════════════
@@ -7329,6 +7601,7 @@ with st.sidebar:
     show_market  = st.toggle("顯示市場環境面板",   value=True)
     show_ai      = st.toggle("啟用 AI 技術分析",  value=True)
     show_social  = st.toggle("社群情緒面板 (StockTwits/Reddit)", value=True)
+    show_options = st.toggle("📊 期權數據面板 (P/C Ratio / IV / 流向)", value=True)
 
     st.markdown("---")
     st.markdown("**🌙 延長時段**")

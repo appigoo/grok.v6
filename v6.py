@@ -321,6 +321,7 @@ if "calc_log"         not in st.session_state: st.session_state.calc_log        
 if "decision_log"     not in st.session_state: st.session_state.decision_log     = []  # 決策日誌
 if "open_trades"      not in st.session_state: st.session_state.open_trades      = {}  # 未平倉交易
 if "trade_id_counter" not in st.session_state: st.session_state.trade_id_counter = 1   # 交易ID計數器
+if "psych_log"        not in st.session_state: st.session_state.psych_log        = []  # 心理日誌
 
 # ══════════════════════════════════════════════════════════════════════════════
 # 市場環境數據
@@ -2058,404 +2059,523 @@ def tl_calc_stats() -> dict:
     }
 
 
-def render_trading_log():
-    """渲染完整交易日誌面板"""
+def tl_log_psychology(symbol: str, emotion: str, note: str,
+                      pnl_pct: float, trade_id: str,
+                      confidence: int = 50, fatigue: int = 30):
+    """
+    記錄交易心理狀態
+    emotion:    冷靜 / 自信 / FOMO / 恐懼 / 貪婪 / 疲勞
+    confidence: 信心度 0-100
+    fatigue:    疲勞度 0-100
+    """
+    entry = {
+        "timestamp":  datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "symbol":     symbol,
+        "trade_id":   trade_id,
+        "emotion":    emotion,
+        "note":       note,
+        "pnl_pct":    pnl_pct,
+        "confidence": confidence,
+        "fatigue":    fatigue,
+    }
+    if "psych_log" not in st.session_state:
+        st.session_state.psych_log = []
+    st.session_state.psych_log.insert(0, entry)
+    st.session_state.psych_log = st.session_state.psych_log[:200]
+    """完整交易日誌系統 v3.0 - 四大核心模組"""
     st.markdown("---")
-
-    # ── 標題 ─────────────────────────────────────────────────────────────────
     st.markdown("""
-    <div style="display:flex;align-items:center;gap:12px;margin-bottom:20px;">
-      <div style="font-size:1.6rem;font-weight:900;color:#e0e8ff;
-                  letter-spacing:-0.5px;font-family:'Courier New',monospace;">
+    <div style="display:flex;align-items:center;gap:12px;margin-bottom:16px;">
+      <div style="font-size:1.5rem;font-weight:900;color:#e0e8ff;font-family:'Courier New',monospace;">
         📒 TRADING LOG
       </div>
-      <div style="font-size:0.75rem;color:#445577;padding:3px 10px;
-                  border:1px solid #223355;border-radius:20px;font-family:monospace;">
-        SYSTEM v2.0
-      </div>
+      <div style="font-size:0.72rem;color:#445577;padding:2px 10px;
+                  border:1px solid #223355;border-radius:20px;font-family:monospace;">v3.0</div>
     </div>
     """, unsafe_allow_html=True)
 
-    tl_tabs = st.tabs(["📈 交易記錄", "🧮 計算日誌", "🎯 決策日誌", "📊 績效統計", "➕ 手動記錄"])
+    tabs = st.tabs([
+        "📋 執行記錄", "🛡 風險管理", "📊 Setup績效",
+        "🧠 心理日誌", "📈 績效統計", "➕ 新增交易"
+    ])
 
     # ══════════════════════════════════════════════════════════════════════════
-    # TAB 1: 交易記錄
+    # TAB 1: 執行記錄（Entry / Exit / Size / PnL / R-multiple）
     # ══════════════════════════════════════════════════════════════════════════
-    with tl_tabs[0]:
-        open_tr  = st.session_state.open_trades
-        all_log  = st.session_state.trade_log
+    with tabs[0]:
+        st.markdown("#### 📋 交易執行記錄")
+        all_log = st.session_state.trade_log
+        open_tr = st.session_state.open_trades
 
-        # 未平倉
+        # ── 未平倉 ───────────────────────────────────────────────────────────
         if open_tr:
-            st.markdown(f"#### 🟡 未平倉交易（{len(open_tr)} 筆）")
+            st.markdown(f"**🟡 持倉中（{len(open_tr)}筆）**")
             for tid, t in open_tr.items():
-                dir_col = "#00ee66" if t["direction"] == "LONG" else "#ff5566"
-                dir_lbl = "▲ LONG" if t["direction"] == "LONG" else "▼ SHORT"
-                sl_str  = f"{t['stop_loss']:.2f}"  if t["stop_loss"]  else "—"
-                tp_str  = f"{t['take_profit']:.2f}" if t["take_profit"] else "—"
-                sigs    = "、".join(t["entry_signals"][:3]) if t["entry_signals"] else "手動"
-
+                dc   = "#00ee66" if t["direction"]=="LONG" else "#ff5566"
+                dl   = "▲ LONG"  if t["direction"]=="LONG" else "▼ SHORT"
+                sl   = t.get("stop_loss"); tp = t.get("take_profit")
+                risk = abs(t["entry_price"] - sl) if sl else None
+                rr   = abs((tp - t["entry_price"]) / risk) if (tp and risk) else None
                 st.markdown(f"""
-                <div style="background:#0c1220;border:1px solid {dir_col}44;
-                            border-left:3px solid {dir_col};border-radius:8px;
-                            padding:12px 16px;margin:6px 0;font-family:monospace;">
-                  <div style="display:flex;justify-content:space-between;align-items:center;">
+                <div style="background:#0c1220;border-left:3px solid {dc};
+                            border-radius:6px;padding:10px 14px;margin:4px 0;font-family:monospace;font-size:0.82rem;">
+                  <div style="display:flex;justify-content:space-between;">
                     <div>
-                      <span style="color:#7799cc;font-size:0.75rem;">{tid}</span>
-                      <span style="color:{dir_col};font-weight:700;margin-left:10px;">{dir_lbl}</span>
-                      <span style="color:#ccd6ee;font-weight:700;margin-left:8px;">{t['symbol']}</span>
-                      <span style="color:#667799;margin-left:8px;font-size:0.8rem;">{t['period']}</span>
+                      <span style="color:#7799cc;">{tid}</span>
+                      <span style="color:{dc};font-weight:700;margin:0 8px;">{dl}</span>
+                      <span style="color:#ccd6ee;font-weight:700;">{t['symbol']}</span>
+                      <span style="color:#556677;margin-left:6px;">{t.get('period','')}</span>
                     </div>
-                    <span style="background:#1a2a1a;color:#ffdd44;border-radius:4px;
-                                 padding:2px 8px;font-size:0.75rem;">⏳ OPEN</span>
+                    <span style="color:#ffdd44;font-size:0.72rem;">⏳ OPEN</span>
                   </div>
-                  <div style="display:flex;gap:24px;margin-top:8px;font-size:0.82rem;">
-                    <div><span style="color:#445577;">進場</span>
-                         <span style="color:#ccd6ee;margin-left:6px;font-weight:600;">${t['entry_price']:.2f}</span></div>
-                    <div><span style="color:#445577;">時間</span>
-                         <span style="color:#aabbcc;margin-left:6px;">{t['entry_time']}</span></div>
-                    <div><span style="color:#ff4444;">SL</span>
-                         <span style="color:#ff8888;margin-left:6px;">{sl_str}</span></div>
-                    <div><span style="color:#44dd88;">TP</span>
-                         <span style="color:#88ffbb;margin-left:6px;">{tp_str}</span></div>
-                  </div>
-                  <div style="margin-top:6px;font-size:0.75rem;color:#556688;">
-                    信號：{sigs}
-                  </div>
-                  <div style="margin-top:4px;font-size:0.75rem;color:#445566;">
-                    原因：{t.get('entry_reason','—')}
+                  <div style="display:flex;gap:20px;margin-top:6px;flex-wrap:wrap;">
+                    <div><span style="color:#445577;">Entry</span> <span style="color:#ccd6ee;font-weight:600;">{t['entry_price']:.2f}</span></div>
+                    <div><span style="color:#445577;">Size</span>  <span style="color:#ccd6ee;">{t['size']}</span></div>
+                    <div><span style="color:#ff5566;">Stop</span>  <span style="color:#ff8888;">{sl:.2f if sl else '—'}</span></div>
+                    <div><span style="color:#44dd88;">Target</span><span style="color:#88ffcc;">{tp:.2f if tp else '—'}</span></div>
+                    <div><span style="color:#cc88ff;">R:R</span>   <span style="color:#ddaaff;">{f'{rr:.1f}:1' if rr else '—'}</span></div>
+                    <div><span style="color:#445577;">Setup</span> <span style="color:#aabbcc;">{t.get('setup','—')}</span></div>
                   </div>
                 </div>
                 """, unsafe_allow_html=True)
-
-                # 平倉表單
-                with st.expander(f"平倉 {tid}", expanded=False):
-                    c1, c2 = st.columns([2, 2])
-                    with c1:
-                        exit_px = st.number_input(f"出場價格 ({tid})", value=float(t["entry_price"]), step=0.01, key=f"exit_px_{tid}")
-                    with c2:
-                        exit_reason = st.text_input("平倉原因", value="", key=f"exit_reason_{tid}")
-                    if st.button(f"✅ 確認平倉 {tid}", key=f"close_{tid}", type="primary"):
-                        result = tl_close_trade(tid, exit_px, reason=exit_reason)
-                        pnl_c  = "#00ee66" if result["pnl_pct"] >= 0 else "#ff5566"
-                        st.success(f"已平倉 {tid}：損益 {result['pnl_pct']:+.2f}%（{result['pnl']:+.4f}）")
+                with st.expander(f"平倉 {tid}"):
+                    cx1,cx2,cx3 = st.columns(3)
+                    with cx1: x_px = st.number_input("出場價", value=float(t["entry_price"]), step=0.01, key=f"xpx_{tid}")
+                    with cx2: x_rs = st.text_input("出場原因", key=f"xrs_{tid}")
+                    with cx3: x_em = st.selectbox("情緒狀態", ["冷靜","貪婪","恐懼","FOMO","疲勞","自信"], key=f"xem_{tid}")
+                    if st.button(f"✅ 確認平倉 {tid}", key=f"xcl_{tid}", type="primary"):
+                        res = tl_close_trade(tid, x_px, reason=x_rs)
+                        res["exit_emotion"] = x_em
+                        # 記錄心理日誌
+                        tl_log_psychology(t["symbol"], x_em, x_rs, res.get("pnl_pct",0), tid)
+                        st.success(f"平倉 {tid}：{res['pnl_pct']:+.2f}%")
                         st.rerun()
         else:
             st.info("目前無未平倉交易")
 
-        # 已平倉歷史
-        closed_log = [t for t in all_log if t["status"] == "CLOSED"]
-        if closed_log:
-            st.markdown(f"#### 📋 已平倉記錄（{len(closed_log)} 筆）")
+        # ── 已平倉記錄表 ─────────────────────────────────────────────────────
+        closed = [t for t in all_log if t["status"]=="CLOSED"]
+        if closed:
+            st.markdown(f"**📋 已平倉記錄（{len(closed)}筆）**")
             rows = []
-            for t in closed_log:
-                pnl_pct = t.get("pnl_pct", 0) or 0
+            for t in closed:
+                ep   = t["entry_price"]; xp = t.get("exit_price", ep)
+                sl   = t.get("stop_loss"); risk = abs(ep-sl) if sl else None
+                pnl  = t.get("pnl_pct",0) or 0
+                r_mult = pnl/100*ep/risk if (risk and risk>0) else None
                 rows.append({
                     "ID":      t["trade_id"],
                     "股票":    t["symbol"],
                     "方向":    t["direction"],
-                    "週期":    t.get("period","—"),
-                    "進場價":  t["entry_price"],
-                    "出場價":  t.get("exit_price","—"),
-                    "損益%":   f"{pnl_pct:+.2f}%",
+                    "Setup":   t.get("setup","—"),
+                    "Entry":   ep,
+                    "Exit":    xp,
+                    "Stop":    f"{sl:.2f}" if sl else "—",
+                    "Size":    t["size"],
+                    "PnL%":    f"{pnl:+.2f}%",
+                    "PnL$":    f"{t.get('pnl',0):+.2f}",
+                    "R-mult":  f"{r_mult:+.2f}R" if r_mult else "—",
                     "持倉":    t.get("duration","—"),
-                    "進場時間": t["entry_time"],
-                    "平倉原因": t.get("exit_reason","—"),
+                    "情緒":    t.get("exit_emotion","—"),
                 })
-            df_closed = pd.DataFrame(rows)
-
-            def _color_pnl(val):
-                if "+" in str(val): return "color: #00ee66; font-weight: bold"
-                if "-" in str(val): return "color: #ff5566; font-weight: bold"
+            df_c = pd.DataFrame(rows)
+            def _color(val):
+                if "+" in str(val) and val!="—": return "color:#00ee66;font-weight:bold"
+                if "-" in str(val) and val!="—": return "color:#ff5566;font-weight:bold"
                 return ""
-
-            st.dataframe(
-                df_closed.style.applymap(_color_pnl, subset=["損益%"]),
-                use_container_width=True, height=300
-            )
-
-            # CSV 下載
-            csv_tl = df_closed.to_csv(index=False, encoding="utf-8-sig")
-            st.download_button("📥 下載交易記錄 CSV", csv_tl,
-                               file_name=f"trade_log_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
+            st.dataframe(df_c.style.applymap(_color, subset=["PnL%","PnL$","R-mult"]),
+                         use_container_width=True, height=280)
+            csv = df_c.to_csv(index=False, encoding="utf-8-sig")
+            st.download_button("📥 下載 CSV", csv,
+                               f"trades_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
                                mime="text/csv")
 
     # ══════════════════════════════════════════════════════════════════════════
-    # TAB 2: 計算日誌
+    # TAB 2: 風險管理（Position Sizing / Risk% / Stop / R-multiples）
     # ══════════════════════════════════════════════════════════════════════════
-    with tl_tabs[1]:
-        calc_l = st.session_state.calc_log
-        if not calc_l:
-            st.info("暫無計算日誌。計算日誌會在偵測器運行時自動記錄。")
-        else:
-            # 過濾控件
-            fc1, fc2, fc3 = st.columns(3)
-            with fc1:
-                syms_c = ["全部"] + sorted(set(e["symbol"] for e in calc_l))
-                f_sym  = st.selectbox("股票", syms_c, key="calc_f_sym")
-            with fc2:
-                levels = ["全部", "trigger", "info", "skip", "error"]
-                f_lvl  = st.selectbox("類型", levels, key="calc_f_lvl")
-            with fc3:
-                steps_c = ["全部"] + sorted(set(e["step"] for e in calc_l))
-                f_step  = st.selectbox("計算步驟", steps_c[:20], key="calc_f_step")
+    with tabs[1]:
+        st.markdown("#### 🛡 風險管理儀表板")
+        rc1, rc2 = st.columns([1,2])
+        with rc1:
+            st.markdown("**⚙️ 風控參數**")
+            acct_size  = st.number_input("帳戶資金 ($)", value=float(st.session_state.get("acct_size",100000)), step=1000.0, key="acct_size")
+            risk_pct   = st.number_input("單筆風險 %", value=float(st.session_state.get("risk_pct",1.0)), step=0.1, min_value=0.1, max_value=5.0, key="risk_pct")
+            st.session_state["acct_size"] = acct_size
+            st.session_state["risk_pct"]  = risk_pct
+            max_risk_amt = acct_size * risk_pct / 100
+            st.markdown(f"""
+            <div style="background:#0c1220;border:1px solid #1e3050;border-radius:8px;padding:12px;margin-top:8px;font-family:monospace;">
+              <div style="color:#445577;font-size:0.72rem;">單筆最大風險金額</div>
+              <div style="color:#ff8855;font-size:1.4rem;font-weight:900;">${max_risk_amt:,.0f}</div>
+              <div style="color:#445577;font-size:0.72rem;margin-top:8px;">當前持倉風險</div>
+              <div style="color:#ffdd44;font-size:1.1rem;font-weight:700;">
+                ${sum(abs(t['entry_price']-t.get('stop_loss',t['entry_price']))*t['size']
+                      for t in st.session_state.open_trades.values()
+                      if t.get('stop_loss')):,.0f}
+              </div>
+            </div>
+            """, unsafe_allow_html=True)
 
-            filtered = [
-                e for e in calc_l
-                if (f_sym  == "全部" or e["symbol"] == f_sym)
-                and (f_lvl  == "全部" or e["level"]  == f_lvl)
-                and (f_step == "全部" or e["step"]   == f_step)
-            ]
-
-            level_styles = {
-                "trigger": ("background:#0d2a18;border-left:3px solid #00dd66;", "#00dd66"),
-                "info":    ("background:#0c1220;border-left:3px solid #336699;", "#6699bb"),
-                "skip":    ("background:#141414;border-left:3px solid #334455;", "#445566"),
-                "error":   ("background:#2a0d0d;border-left:3px solid #ff4444;", "#ff4444"),
-            }
-
-            st.markdown(f"**顯示 {len(filtered)} 筆 / 共 {len(calc_l)} 筆**")
-            for e in filtered[:100]:
-                sty, col = level_styles.get(e["level"], level_styles["info"])
-                val_str  = f'　→ <span style="color:#ffdd44;font-weight:600;">{e["value"]} {e["unit"]}</span>' if e["value"] is not None else ""
+        with rc2:
+            st.markdown("**🧮 倉位計算器**")
+            ps1, ps2, ps3 = st.columns(3)
+            with ps1: ps_entry = st.number_input("進場價", value=400.0, step=0.01, key="ps_entry")
+            with ps2: ps_stop  = st.number_input("止損價", value=395.0, step=0.01, key="ps_stop")
+            with ps3: ps_sym   = st.text_input("股票",   value="TSLA",               key="ps_sym")
+            if ps_entry != ps_stop:
+                risk_per_share = abs(ps_entry - ps_stop)
+                shares = int(max_risk_amt / risk_per_share)
+                total_exposure = shares * ps_entry
+                pct_of_acct    = total_exposure / acct_size * 100
                 st.markdown(f"""
-                <div style="{sty}border-radius:4px;padding:6px 12px;
-                             margin:3px 0;font-family:monospace;font-size:0.78rem;">
-                  <span style="color:#445566;">{e['timestamp']}</span>
-                  <span style="color:#8899aa;margin:0 8px;">[{e['symbol']} {e['period']}]</span>
-                  <span style="color:{col};font-weight:600;">{e['step']}</span>
-                  <span style="color:#8899bb;margin-left:8px;">{e['detail']}</span>
-                  {val_str}
+                <div style="background:#0a1020;border:1px solid #223355;border-radius:8px;
+                            padding:14px;font-family:monospace;">
+                  <div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:12px;text-align:center;">
+                    <div>
+                      <div style="color:#445577;font-size:0.72rem;">建議股數</div>
+                      <div style="color:#00ee66;font-size:1.5rem;font-weight:900;">{shares}</div>
+                    </div>
+                    <div>
+                      <div style="color:#445577;font-size:0.72rem;">每股風險</div>
+                      <div style="color:#ff8855;font-size:1.5rem;font-weight:900;">${risk_per_share:.2f}</div>
+                    </div>
+                    <div>
+                      <div style="color:#445577;font-size:0.72rem;">總曝險</div>
+                      <div style="color:#ffdd44;font-size:1.5rem;font-weight:900;">${total_exposure:,.0f}</div>
+                    </div>
+                    <div>
+                      <div style="color:#445577;font-size:0.72rem;">佔帳戶</div>
+                      <div style="color:#cc88ff;font-size:1.5rem;font-weight:900;">{pct_of_acct:.1f}%</div>
+                    </div>
+                  </div>
+                  <div style="margin-top:12px;padding:8px;background:#141c2e;border-radius:6px;
+                              font-size:0.78rem;color:#667799;">
+                    止損金額: <span style="color:#ff5566;">${shares*risk_per_share:,.0f}</span>
+                    （{risk_pct}% 帳戶）　
+                    1R = ${shares*risk_per_share:,.0f}　
+                    2R目標 = ${ps_entry + (ps_entry-ps_stop)*2:.2f}　
+                    3R目標 = ${ps_entry + (ps_entry-ps_stop)*3:.2f}
+                  </div>
                 </div>
                 """, unsafe_allow_html=True)
 
-            if st.button("🗑 清除計算日誌", key="clear_calc_log"):
-                st.session_state.calc_log = []
+        # ── R-multiple 分布圖 ─────────────────────────────────────────────────
+        closed_r = [t for t in st.session_state.trade_log
+                    if t["status"]=="CLOSED" and t.get("stop_loss") and t.get("pnl_pct")]
+        if len(closed_r) >= 2:
+            st.markdown("**📊 R-Multiple 分布**")
+            r_mults = []
+            for t in closed_r:
+                ep = t["entry_price"]; sl = t["stop_loss"]; risk = abs(ep-sl)
+                if risk > 0:
+                    r_mults.append(t["pnl_pct"]/100*ep/risk)
+            if r_mults:
+                import plotly.graph_objects as go
+                colors = ["#00ee66" if r>=0 else "#ff5566" for r in r_mults]
+                fig = go.Figure(go.Bar(y=r_mults, marker_color=colors, opacity=0.85, marker_line_width=0))
+                fig.add_hline(y=0, line_color="#334455", line_width=1)
+                fig.add_hline(y=1, line_color="#00ee6644", line_width=1, line_dash="dot")
+                fig.add_hline(y=2, line_color="#ffdd4444", line_width=1, line_dash="dot")
+                fig.update_layout(paper_bgcolor="#0a0e18", plot_bgcolor="#0c1220",
+                                  font=dict(color="#7799cc",family="monospace"),
+                                  height=220, margin=dict(l=40,r=10,t=10,b=30),
+                                  yaxis=dict(gridcolor="#1a2535",title="R"),
+                                  xaxis=dict(gridcolor="#1a2535",title="交易序號"))
+                st.plotly_chart(fig, use_container_width=True)
+                avg_r = sum(r_mults)/len(r_mults)
+                st.markdown(f"平均R: **{avg_r:+.2f}R**　最大虧損: **{min(r_mults):.2f}R**　最大獲利: **{max(r_mults):.2f}R**")
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # TAB 3: Setup績效（每個偵測器的實際勝率/盈虧/Expectancy）
+    # ══════════════════════════════════════════════════════════════════════════
+    with tabs[2]:
+        st.markdown("#### 📊 Setup 績效分析")
+        closed_all = [t for t in st.session_state.trade_log if t["status"]=="CLOSED"]
+        if not closed_all:
+            st.info("尚無已平倉交易記錄")
+        else:
+            from collections import defaultdict
+            setup_stats = defaultdict(lambda: {"trades":[]})
+            for t in closed_all:
+                s = t.get("setup","未分類")
+                pnl = t.get("pnl_pct",0) or 0
+                ep  = t["entry_price"]; sl = t.get("stop_loss")
+                risk = abs(ep-sl) if sl else None
+                r = pnl/100*ep/risk if (risk and risk>0) else None
+                setup_stats[s]["trades"].append({"pnl":pnl,"r":r,"tid":t["trade_id"]})
+
+            # 計算每個 Setup 的統計
+            rows_s = []
+            for setup, data in sorted(setup_stats.items()):
+                trs   = data["trades"]
+                n     = len(trs)
+                wins  = [x for x in trs if x["pnl"]>0]
+                loss  = [x for x in trs if x["pnl"]<=0]
+                wr    = len(wins)/n*100 if n>0 else 0
+                avg_w = sum(x["pnl"] for x in wins)/len(wins)   if wins else 0
+                avg_l = sum(x["pnl"] for x in loss)/len(loss)   if loss else 0
+                exp   = wr/100*avg_w + (1-wr/100)*avg_l
+                r_vals = [x["r"] for x in trs if x["r"] is not None]
+                avg_r  = sum(r_vals)/len(r_vals) if r_vals else None
+                rows_s.append({
+                    "Setup":      setup,
+                    "筆數":       n,
+                    "勝率%":      f"{wr:.0f}%",
+                    "平均獲利%":  f"{avg_w:+.2f}%",
+                    "平均虧損%":  f"{avg_l:+.2f}%",
+                    "期望值%":    f"{exp:+.2f}%",
+                    "平均R":      f"{avg_r:+.2f}R" if avg_r else "—",
+                    "評級":       ("⭐⭐⭐" if wr>=60 and (avg_r or 0)>=1.5
+                                   else "⭐⭐" if wr>=50 else "⭐" if exp>0 else "❌"),
+                })
+
+            df_s = pd.DataFrame(rows_s).sort_values("期望值%", ascending=False)
+            def _color_setup(val):
+                if "+" in str(val): return "color:#00ee66;font-weight:bold"
+                if "-" in str(val): return "color:#ff5566;font-weight:bold"
+                if "⭐" in str(val): return "color:#ffdd44"
+                if "❌" in str(val): return "color:#ff4444"
+                return ""
+            st.dataframe(df_s.style.applymap(_color_setup,
+                         subset=["平均獲利%","平均虧損%","期望值%","平均R","評級"]),
+                         use_container_width=True, height=320)
+
+            # 最佳/最差 Setup
+            best = rows_s[0] if rows_s else None
+            if best:
+                st.markdown(f"""
+                <div style="display:flex;gap:12px;margin-top:8px;">
+                  <div style="background:#0d2218;border:1px solid #00ee6633;border-radius:8px;
+                              padding:10px 16px;flex:1;font-family:monospace;font-size:0.82rem;">
+                    <div style="color:#00ee66;font-weight:700;">🏆 最佳 Setup</div>
+                    <div style="color:#ccd6ee;margin-top:4px;">{best['Setup']}</div>
+                    <div style="color:#aabbcc;">期望值 {best['期望值%']}　勝率 {best['勝率%']}　{best['平均R']}</div>
+                  </div>
+                </div>
+                """, unsafe_allow_html=True)
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # TAB 4: 心理日誌（情緒/疲勞/FOMO/信心 vs 交易結果）
+    # ══════════════════════════════════════════════════════════════════════════
+    with tabs[3]:
+        st.markdown("#### 🧠 交易心理日誌")
+        psych_log = st.session_state.get("psych_log", [])
+
+        # 情緒 vs 勝率統計
+        if psych_log:
+            from collections import defaultdict
+            emo_stats = defaultdict(lambda:{"wins":0,"total":0,"pnls":[]})
+            for e in psych_log:
+                em = e.get("emotion","未知")
+                emo_stats[em]["total"] += 1
+                emo_stats[em]["pnls"].append(e.get("pnl_pct",0))
+                if e.get("pnl_pct",0) > 0: emo_stats[em]["wins"] += 1
+
+            st.markdown("**📊 情緒狀態 vs 勝率（核心統計）**")
+            emo_colors = {
+                "冷靜":"#00ee66","自信":"#44dd88",
+                "FOMO":"#ff5566","恐懼":"#ff8855",
+                "貪婪":"#ffaa00","疲勞":"#cc6655","其他":"#7799cc"
+            }
+            cards = ['<div style="display:flex;flex-wrap:wrap;gap:10px;margin-bottom:16px;">']
+            for em, data in sorted(emo_stats.items(), key=lambda x:-x[1]["total"]):
+                n    = data["total"]; wins = data["wins"]
+                wr   = wins/n*100 if n>0 else 0
+                avg  = sum(data["pnls"])/n if n>0 else 0
+                col  = emo_colors.get(em,"#7799cc")
+                warn = "⚠️" if (wr<40 and n>=2) else ""
+                cards.append(f"""
+                <div style="background:#0c1220;border:1px solid {col}44;border-left:3px solid {col};
+                            border-radius:8px;padding:10px 14px;min-width:120px;font-family:monospace;">
+                  <div style="color:{col};font-weight:700;font-size:0.85rem;">{warn}{em}</div>
+                  <div style="color:#ccd6ee;font-size:1.4rem;font-weight:900;">{wr:.0f}%</div>
+                  <div style="background:#141c2e;border-radius:2px;height:3px;margin:4px 0;">
+                    <div style="width:{wr}%;background:{col};height:3px;border-radius:2px;"></div>
+                  </div>
+                  <div style="color:#445566;font-size:0.72rem;">{n}筆　avg{avg:+.1f}%</div>
+                </div>""")
+            cards.append("</div>")
+            st.markdown("".join(cards), unsafe_allow_html=True)
+
+            # 情緒交易警告
+            bad_emotions = {em:d for em,d in emo_stats.items()
+                            if d["total"]>=2 and d["wins"]/d["total"]<0.4}
+            if bad_emotions:
+                st.markdown("""
+                <div style="background:#2a0d0d;border:1px solid #ff444444;border-radius:8px;
+                            padding:12px 16px;margin-bottom:12px;">
+                  <div style="color:#ff5566;font-weight:700;margin-bottom:6px;">
+                    🚨 情緒交易警告
+                  </div>""" +
+                "".join(f'<div style="color:#cc8888;font-size:0.82rem;margin:2px 0;">'
+                        f'{em}狀態下勝率僅 {d["wins"]/d["total"]*100:.0f}%'
+                        f'（{d["total"]}筆），建議此狀態下暫停交易</div>'
+                        for em,d in bad_emotions.items()) +
+                "</div>", unsafe_allow_html=True)
+
+            # 心理日誌列表
+            st.markdown("**📝 心理記錄**")
+            for e in psych_log[-20:][::-1]:
+                em  = e.get("emotion","—")
+                col = emo_colors.get(em,"#7799cc")
+                pnl = e.get("pnl_pct",0)
+                st.markdown(f"""
+                <div style="background:#0c1220;border-left:2px solid {col};
+                            border-radius:4px;padding:6px 12px;margin:3px 0;
+                            font-family:monospace;font-size:0.78rem;">
+                  <span style="color:{col};font-weight:700;">{em}</span>
+                  <span style="color:#445566;margin:0 8px;">{e.get('timestamp','')}</span>
+                  <span style="color:{'#00ee66' if pnl>=0 else '#ff5566'};font-weight:600;">{pnl:+.2f}%</span>
+                  <span style="color:#667788;margin-left:10px;">{e.get('note','')}</span>
+                </div>
+                """, unsafe_allow_html=True)
+        else:
+            st.info("尚無心理記錄。平倉時選擇情緒狀態即可自動記錄。")
+
+        # 手動記錄心理狀態
+        with st.expander("✍️ 手動記錄當前心理狀態"):
+            pm1, pm2 = st.columns(2)
+            with pm1:
+                pm_em  = st.selectbox("情緒", ["冷靜","自信","FOMO","恐懼","貪婪","疲勞"], key="pm_em")
+                pm_conf= st.slider("信心度", 0, 100, 60, key="pm_conf")
+            with pm2:
+                pm_fat = st.slider("疲勞度", 0, 100, 30, key="pm_fat")
+                pm_note= st.text_input("備注（市場觀察/今日狀態）", key="pm_note")
+            if st.button("📝 記錄心理狀態", key="pm_save"):
+                tl_log_psychology("—", pm_em, pm_note, 0, "—",
+                                  confidence=pm_conf, fatigue=pm_fat)
+                st.success("已記錄")
                 st.rerun()
 
     # ══════════════════════════════════════════════════════════════════════════
-    # TAB 3: 決策日誌
+    # TAB 5: 績效統計（完整Risk-adjusted）
     # ══════════════════════════════════════════════════════════════════════════
-    with tl_tabs[2]:
-        dec_l = st.session_state.decision_log
-        if not dec_l:
-            st.info("暫無決策日誌。每次偵測器評估都會在此記錄。")
-        else:
-            # 統計：各偵測器觸發率
-            from collections import Counter
-            det_triggered = Counter(e["detector"] for e in dec_l if e["triggered"])
-            det_total     = Counter(e["detector"] for e in dec_l)
-            det_rates = {
-                d: round(det_triggered.get(d,0) / det_total[d] * 100, 1)
-                for d in det_total
-            }
-
-            st.markdown("#### 🔬 偵測器觸發率統計")
-            rate_html = ['<div style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:16px;">']
-            for det in sorted(det_total.keys()):
-                rate = det_rates[det]
-                cnt  = det_total[det]
-                trig = det_triggered.get(det, 0)
-                col  = "#00ee66" if rate > 60 else "#ffdd44" if rate > 20 else "#ff5566"
-                rate_html.append(f"""
-                <div style="background:#0c1220;border:1px solid {col}44;border-radius:6px;
-                             padding:6px 10px;font-family:monospace;min-width:90px;text-align:center;">
-                  <div style="color:#ccd6ee;font-weight:700;font-size:0.85rem;">{det}</div>
-                  <div style="color:{col};font-size:1.1rem;font-weight:900;">{rate}%</div>
-                  <div style="color:#445566;font-size:0.7rem;">{trig}/{cnt}</div>
-                </div>""")
-            rate_html.append("</div>")
-            st.markdown("".join(rate_html), unsafe_allow_html=True)
-
-            # 決策記錄列表
-            fd1, fd2 = st.columns(2)
-            with fd1:
-                syms_d = ["全部"] + sorted(set(e["symbol"] for e in dec_l))
-                f_sym_d = st.selectbox("股票", syms_d, key="dec_f_sym")
-            with fd2:
-                f_trig = st.selectbox("狀態", ["全部", "已觸發", "未觸發"], key="dec_f_trig")
-
-            filtered_d = [
-                e for e in dec_l
-                if (f_sym_d == "全部" or e["symbol"] == f_sym_d)
-                and (f_trig == "全部"
-                     or (f_trig == "已觸發" and e["triggered"])
-                     or (f_trig == "未觸發" and not e["triggered"]))
-            ]
-
-            for e in filtered_d[:80]:
-                trig_style = ("background:#0d2218;border-left:3px solid #00cc55;", "✅", "#00cc55") \
-                             if e["triggered"] else \
-                             ("background:#0c1220;border-left:3px solid #334455;", "⬜", "#445566")
-                sty, icon, col = trig_style
-                sig_col = {"bull": "#00ee66", "bear": "#ff5566", "info": "#6699bb", "vol": "#cc88ff"}.get(e["signal_type"], "#888")
-
-                kv_str = ""
-                if e["key_values"]:
-                    kv_parts = [f'<span style="color:#ffdd44;">{k}</span>=<span style="color:#aabbcc;">{v}</span>'
-                                for k, v in list(e["key_values"].items())[:6]]
-                    kv_str = f'<div style="margin-top:4px;font-size:0.72rem;color:#667788;">{"　".join(kv_parts)}</div>'
-
-                conf_bar = f'<div style="display:inline-block;width:{e["confidence"]}px;max-width:100px;height:3px;background:{col};border-radius:2px;vertical-align:middle;margin-left:6px;"></div>'
-
-                st.markdown(f"""
-                <div style="{sty}border-radius:6px;padding:8px 12px;margin:4px 0;font-family:monospace;">
-                  <div style="display:flex;justify-content:space-between;align-items:center;">
-                    <div>
-                      <span style="font-size:0.9rem;">{icon}</span>
-                      <span style="color:#8899aa;font-size:0.72rem;margin-left:6px;">{e['timestamp']}</span>
-                      <span style="color:{col};font-weight:700;margin-left:8px;">{e['detector']}</span>
-                      <span style="color:#ccd6ee;margin-left:8px;">{e['symbol']}</span>
-                      <span style="color:#556677;margin-left:6px;font-size:0.75rem;">{e['period']}</span>
-                    </div>
-                    <div style="display:flex;align-items:center;gap:8px;">
-                      <span style="color:{sig_col};font-size:0.72rem;border:1px solid {sig_col}44;
-                                   border-radius:3px;padding:1px 5px;">{e['signal_type']}</span>
-                      <span style="color:#667788;font-size:0.72rem;">信心{e['confidence']}%</span>
-                      {conf_bar}
-                    </div>
-                  </div>
-                  <div style="color:#8899aa;font-size:0.78rem;margin-top:4px;">{e['reason']}</div>
-                  {kv_str}
-                </div>
-                """, unsafe_allow_html=True)
-
-    # ══════════════════════════════════════════════════════════════════════════
-    # TAB 4: 績效統計
-    # ══════════════════════════════════════════════════════════════════════════
-    with tl_tabs[3]:
+    with tabs[4]:
+        st.markdown("#### 📈 績效統計（Risk-Adjusted）")
         stats = tl_calc_stats()
-        if stats.get("total", 0) == 0:
-            st.info("尚無已平倉交易，完成第一筆交易後績效統計將在此顯示。")
+        if stats.get("total",0) == 0:
+            st.info("尚無已平倉交易")
         else:
-            total    = stats["total"]
-            wins     = stats["wins"]
-            losses   = stats["losses"]
-            wr       = stats["win_rate"]
-            pf       = stats["profit_factor"]
-            tot_pnl  = stats["total_pnl_pct"]
-            max_dd   = stats["max_drawdown"]
-            expect   = stats["expectancy"]
-            avg_w    = stats["avg_win"]
-            avg_l    = stats["avg_loss"]
+            t  = stats["total"]; w = stats["wins"]; l = stats["losses"]
+            wr = stats["win_rate"]; pf = stats["profit_factor"]
+            tot = stats["total_pnl_pct"]; dd = stats["max_drawdown"]
+            exp = stats["expectancy"]
+            wr_c  = "#00ee66" if wr>=55 else "#ffdd44" if wr>=40 else "#ff5566"
+            pnl_c = "#00ee66" if tot>=0 else "#ff5566"
+            pf_c  = "#00ee66" if pf>=1.5 else "#ffdd44" if pf>=1 else "#ff5566"
 
-            wr_col   = "#00ee66" if wr >= 55 else "#ffdd44" if wr >= 40 else "#ff5566"
-            pnl_col  = "#00ee66" if tot_pnl >= 0 else "#ff5566"
-            pf_col   = "#00ee66" if pf >= 1.5 else "#ffdd44" if pf >= 1 else "#ff5566"
-
-            # KPI 卡片
+            # KPI 行
             st.markdown(f"""
-            <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin:12px 0;">
-              <div style="background:#0a1020;border:1px solid #1e3050;border-radius:10px;padding:16px;text-align:center;">
-                <div style="color:#445577;font-size:0.75rem;margin-bottom:4px;">總交易筆數</div>
-                <div style="color:#ccd6ee;font-size:2rem;font-weight:900;font-family:monospace;">{total}</div>
-                <div style="color:#445566;font-size:0.72rem;">勝{wins} / 敗{losses}</div>
-              </div>
-              <div style="background:#0a1020;border:1px solid {wr_col}44;border-radius:10px;padding:16px;text-align:center;">
-                <div style="color:#445577;font-size:0.75rem;margin-bottom:4px;">勝率</div>
-                <div style="color:{wr_col};font-size:2rem;font-weight:900;font-family:monospace;">{wr:.1f}%</div>
-                <div style="background:#141c2e;border-radius:3px;height:4px;margin-top:8px;">
-                  <div style="width:{wr}%;background:{wr_col};height:4px;border-radius:3px;"></div>
-                </div>
-              </div>
-              <div style="background:#0a1020;border:1px solid {pnl_col}44;border-radius:10px;padding:16px;text-align:center;">
-                <div style="color:#445577;font-size:0.75rem;margin-bottom:4px;">累計損益</div>
-                <div style="color:{pnl_col};font-size:2rem;font-weight:900;font-family:monospace;">{tot_pnl:+.2f}%</div>
-                <div style="color:#445566;font-size:0.72rem;">期望值 {expect:+.3f}%</div>
-              </div>
-              <div style="background:#0a1020;border:1px solid {pf_col}44;border-radius:10px;padding:16px;text-align:center;">
-                <div style="color:#445577;font-size:0.75rem;margin-bottom:4px;">獲利因子</div>
-                <div style="color:{pf_col};font-size:2rem;font-weight:900;font-family:monospace;">{pf:.2f}</div>
-                <div style="color:#ff5566;font-size:0.72rem;">最大回撤 -{max_dd:.2f}%</div>
-              </div>
+            <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin:12px 0;">
+              {''.join(f"""
+              <div style="background:#0a1020;border:1px solid #1e3050;border-radius:10px;padding:14px;text-align:center;">
+                <div style="color:#445577;font-size:0.72rem;">{label}</div>
+                <div style="color:{color};font-size:1.6rem;font-weight:900;font-family:monospace;">{value}</div>
+                <div style="color:#445566;font-size:0.7rem;">{sub}</div>
+              </div>"""
+              for label,value,color,sub in [
+                ("總交易",f"{t}",    "#ccd6ee",f"勝{w}/敗{l}"),
+                ("勝率",  f"{wr:.0f}%",wr_c,    f"W:{w} L:{l}"),
+                ("累計損益",f"{tot:+.1f}%",pnl_c,f"期望值{exp:+.2f}%"),
+                ("獲利因子",f"{pf:.2f}",pf_c,   f"最大回撤{dd:.1f}%"),
+              ])}
             </div>
             """, unsafe_allow_html=True)
 
-            # 盈虧分布
-            st.markdown("#### 📊 盈虧分布")
-            closed_trades = [t for t in st.session_state.trade_log if t["status"] == "CLOSED"]
-            if len(closed_trades) >= 2:
-                pnl_series = [t["pnl_pct"] for t in reversed(closed_trades)]
-                cum_series = []
-                cum = 0
-                for p in pnl_series:
-                    cum += p
-                    cum_series.append(cum)
-
+            # 盈虧曲線
+            closed_c = [t for t in st.session_state.trade_log if t["status"]=="CLOSED"]
+            if len(closed_c) >= 2:
                 import plotly.graph_objects as go
+                pnls = [t.get("pnl_pct",0) for t in reversed(closed_c)]
+                cum  = []; s=0
+                for p in pnls: s+=p; cum.append(s)
+                colors = ["#00ee66" if p>=0 else "#ff5566" for p in pnls]
                 fig = go.Figure()
-                colors = ["#00ee66" if p >= 0 else "#ff5566" for p in pnl_series]
-                fig.add_trace(go.Bar(y=pnl_series, name="單筆損益%", marker_color=colors,
-                                     marker_line_width=0, opacity=0.8))
-                fig.add_trace(go.Scatter(y=cum_series, name="累計損益%", mode="lines",
-                                         line=dict(color="#66bbff", width=2)))
-                fig.update_layout(
-                    paper_bgcolor="#0a0e18", plot_bgcolor="#0c1220",
-                    font=dict(color="#7799cc", family="monospace"),
-                    height=280, margin=dict(l=40,r=20,t=20,b=30),
-                    legend=dict(orientation="h", y=1.1),
-                    yaxis=dict(gridcolor="#1a2535", zeroline=True, zerolinecolor="#334455"),
-                    xaxis=dict(gridcolor="#1a2535"),
-                )
+                fig.add_trace(go.Bar(y=pnls, name="單筆%", marker_color=colors,
+                                     opacity=0.7, marker_line_width=0))
+                fig.add_trace(go.Scatter(y=cum, name="累計%", mode="lines+markers",
+                                         line=dict(color="#66bbff",width=2),
+                                         marker=dict(size=4)))
+                fig.update_layout(paper_bgcolor="#0a0e18",plot_bgcolor="#0c1220",
+                                  font=dict(color="#7799cc",family="monospace"),
+                                  height=260,margin=dict(l=40,r=10,t=10,b=30),
+                                  legend=dict(orientation="h",y=1.1),
+                                  yaxis=dict(gridcolor="#1a2535",zeroline=True,
+                                             zerolinecolor="#334455"),
+                                  xaxis=dict(gridcolor="#1a2535"))
                 st.plotly_chart(fig, use_container_width=True)
 
-            # 詳細統計表
+            # 詳細統計
             st.markdown(f"""
             <div style="background:#0c1220;border:1px solid #1e2e48;border-radius:8px;
                         padding:14px 20px;font-family:monospace;font-size:0.82rem;">
-              <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;">
-                <div><span style="color:#445577;">平均獲利</span>
-                     <span style="color:#00ee66;font-weight:700;margin-left:12px;">+{avg_w:.3f}%</span></div>
-                <div><span style="color:#445577;">平均虧損</span>
-                     <span style="color:#ff5566;font-weight:700;margin-left:12px;">{avg_l:.3f}%</span></div>
-                <div><span style="color:#445577;">盈虧比</span>
-                     <span style="color:#ffdd44;font-weight:700;margin-left:12px;">
-                       {abs(avg_w/avg_l):.2f}:1</span></div>
-                <div><span style="color:#445577;">最大回撤</span>
-                     <span style="color:#ff8855;font-weight:700;margin-left:12px;">-{max_dd:.3f}%</span></div>
-                <div><span style="color:#445577;">期望值/筆</span>
-                     <span style="color:{'#00ee66' if expect>=0 else '#ff5566'};font-weight:700;margin-left:12px;">
-                       {expect:+.3f}%</span></div>
-                <div><span style="color:#445577;">獲利因子</span>
-                     <span style="color:{pf_col};font-weight:700;margin-left:12px;">{pf:.2f}</span></div>
+              <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;">
+                <div><span style="color:#445577;">平均獲利</span><span style="color:#00ee66;font-weight:700;margin-left:10px;">+{stats['avg_win']:.2f}%</span></div>
+                <div><span style="color:#445577;">平均虧損</span><span style="color:#ff5566;font-weight:700;margin-left:10px;">{stats['avg_loss']:.2f}%</span></div>
+                <div><span style="color:#445577;">盈虧比</span><span style="color:#ffdd44;font-weight:700;margin-left:10px;">{abs(stats['avg_win']/stats['avg_loss']):.2f}:1</span></div>
+                <div><span style="color:#445577;">最大回撤</span><span style="color:#ff8855;font-weight:700;margin-left:10px;">-{dd:.2f}%</span></div>
+                <div><span style="color:#445577;">期望值/筆</span><span style="color:{'#00ee66' if exp>=0 else '#ff5566'};font-weight:700;margin-left:10px;">{exp:+.3f}%</span></div>
+                <div><span style="color:#445577;">獲利因子</span><span style="color:{pf_c};font-weight:700;margin-left:10px;">{pf:.2f}</span></div>
               </div>
             </div>
             """, unsafe_allow_html=True)
 
     # ══════════════════════════════════════════════════════════════════════════
-    # TAB 5: 手動記錄交易
+    # TAB 6: 新增交易（手動完整填寫）
     # ══════════════════════════════════════════════════════════════════════════
-    with tl_tabs[4]:
-        st.markdown("#### ✍️ 手動記錄交易")
-        st.caption("用於手動記錄在外部平台執行的交易，或補錄歷史交易")
+    with tabs[5]:
+        st.markdown("#### ➕ 新增交易記錄")
+        na1, na2, na3 = st.columns(3)
+        with na1:
+            na_sym  = st.text_input("股票代號", "TSLA", key="na_sym").upper()
+            na_dir  = st.selectbox("方向", ["LONG","SHORT"], key="na_dir")
+            na_setup= st.selectbox("Setup類型", [
+                "G7-長盤整突破","E0-底部反彈","I1-MACD底背離","I2-MACD頂背離",
+                "N1-ORB突破","N2-整理回測","N3-關鍵水平","O1-MTF共振",
+                "D5-空頭排列","D6-均線壓制","手動/其他"
+            ], key="na_setup")
+        with na2:
+            na_ep   = st.number_input("進場價 (Entry)", value=400.0, step=0.01, key="na_ep")
+            na_sl   = st.number_input("止損價 (Stop)",  value=395.0, step=0.01, key="na_sl")
+            na_tp   = st.number_input("目標價 (Target)",value=410.0, step=0.01, key="na_tp")
+        with na3:
+            na_sz   = st.number_input("股數 (Size)",    value=100.0, step=10.0,  key="na_sz")
+            na_em   = st.selectbox("進場情緒", ["冷靜","自信","FOMO","恐懼","貪婪","疲勞"], key="na_em")
+            na_period= st.text_input("週期", "日K", key="na_period")
+        na_reason = st.text_input("進場理由（可填入觸發訊號）", key="na_reason",
+                                   placeholder="例：G7爆量突破399+EMA5金叉+縮量回測守住")
+        na_note   = st.text_area("交易備注（市場環境/計劃）", key="na_note", height=80,
+                                  placeholder="例：VIX=25高恐慌，但TSLA日K出現底背離，計劃若跌破395立即止損")
 
-        m1, m2, m3 = st.columns(3)
-        with m1:
-            m_sym  = st.text_input("股票代號", value="TSLA", key="m_sym").upper()
-            m_dir  = st.selectbox("方向", ["LONG", "SHORT"], key="m_dir")
-        with m2:
-            m_ep   = st.number_input("進場價格", value=400.0, step=0.01, key="m_ep")
-            m_sz   = st.number_input("部位大小（股數）", value=1.0, step=0.5, key="m_sz", min_value=0.1)
-        with m3:
-            m_sl   = st.number_input("止損價格（0=不設）", value=0.0, step=0.01, key="m_sl")
-            m_tp   = st.number_input("目標價格（0=不設）", value=0.0, step=0.01, key="m_tp")
+        if st.button("📝 記錄開倉", type="primary", key="na_open"):
+            if na_sym and na_ep > 0:
+                # 計算R:R
+                risk_per  = abs(na_ep - na_sl)
+                reward    = abs(na_tp - na_ep)
+                rr_ratio  = reward/risk_per if risk_per > 0 else 0
+                acct      = st.session_state.get("acct_size",100000)
+                rp        = st.session_state.get("risk_pct",1.0)
+                max_loss  = acct * rp / 100
+                suggest_sz= int(max_loss / risk_per) if risk_per > 0 else 0
 
-        m_reason = st.text_input("進場原因（訊號/策略）", key="m_reason",
-                                  placeholder="例：G7爆量突破+EMA5金叉，突破399阻力線")
-        m_period = st.text_input("時間週期", value="日K", key="m_period")
-
-        if st.button("📝 記錄開倉", type="primary", key="m_open"):
-            if m_sym and m_ep > 0:
                 tid = tl_open_trade(
-                    symbol=m_sym, direction=m_dir,
-                    entry_price=m_ep, size=m_sz,
-                    stop_loss=m_sl if m_sl > 0 else None,
-                    take_profit=m_tp if m_tp > 0 else None,
-                    reason=m_reason, period=m_period,
-                    signals=m_reason.split("，") if m_reason else [],
+                    symbol=na_sym, direction=na_dir,
+                    entry_price=na_ep, size=na_sz,
+                    stop_loss=na_sl if na_sl!=na_ep else None,
+                    take_profit=na_tp if na_tp!=na_ep else None,
+                    reason=na_reason, period=na_period,
+                    signals=na_reason.split("＋") if na_reason else [],
                 )
-                st.success(f"✅ 已記錄開倉 {tid}：{m_dir} {m_sym} @ {m_ep:.2f}")
-                tl_log_calc(m_sym, m_period, "手動開倉", f"{m_dir} @ {m_ep}", m_ep, "USD", "trigger")
+                st.session_state.open_trades[tid]["setup"]         = na_setup
+                st.session_state.open_trades[tid]["entry_emotion"] = na_em
+                st.session_state.open_trades[tid]["note"]          = na_note
+                # 記錄心理日誌
+                tl_log_psychology(na_sym, na_em, f"開倉 {na_dir} {na_ep}", 0, tid)
+                tl_log_calc(na_sym, na_period, "手動開倉",
+                            f"{na_dir} @ {na_ep} | SL:{na_sl} | TP:{na_tp} | R:R={rr_ratio:.1f}",
+                            na_ep, "USD", "trigger")
+                st.success(f"✅ 已記錄 {tid}：{na_dir} {na_sym} @ {na_ep:.2f}"
+                           f"　R:R={rr_ratio:.1f}:1　建議股數={suggest_sz}（風控{rp}%）")
                 st.rerun()
             else:
                 st.error("請填寫股票代號和進場價格")
@@ -2463,32 +2583,28 @@ def render_trading_log():
         # 快速平倉
         if st.session_state.open_trades:
             st.markdown("---")
-            st.markdown("#### 🔒 快速平倉")
-            q1, q2, q3 = st.columns(3)
-            with q1:
-                q_tid = st.selectbox("選擇交易", list(st.session_state.open_trades.keys()), key="q_tid")
-            with q2:
-                q_xp  = st.number_input("出場價格", value=400.0, step=0.01, key="q_xp")
-            with q3:
-                q_rsn = st.text_input("平倉原因", key="q_rsn",
-                                       placeholder="例：止損觸發/目標達到/訊號反轉")
+            st.markdown("**🔒 快速平倉**")
+            qc1,qc2,qc3,qc4 = st.columns(4)
+            with qc1: q_tid = st.selectbox("選擇交易", list(st.session_state.open_trades.keys()), key="q_tid")
+            with qc2: q_xp  = st.number_input("出場價", value=400.0, step=0.01, key="q_xp")
+            with qc3: q_em  = st.selectbox("出場情緒", ["冷靜","自信","FOMO","恐懼","貪婪","疲勞"], key="q_em")
+            with qc4: q_rsn = st.text_input("出場原因", key="q_rsn")
             if st.button("🔒 確認平倉", type="secondary", key="q_close"):
                 res = tl_close_trade(q_tid, q_xp, reason=q_rsn)
-                pnl_c = "🟢" if res["pnl_pct"] >= 0 else "🔴"
-                st.success(f"{pnl_c} 平倉 {q_tid}：{res['pnl_pct']:+.2f}% / 持倉{res['duration']}")
-                tl_log_calc(res["symbol"], res.get("period",""), "手動平倉",
-                            f"@ {q_xp}", res["pnl_pct"], "%", "trigger")
+                res["exit_emotion"] = q_em
+                tl_log_psychology(res["symbol"], q_em, q_rsn, res.get("pnl_pct",0), q_tid)
+                pnl_icon = "🟢" if res["pnl_pct"]>=0 else "🔴"
+                st.success(f"{pnl_icon} {q_tid} 平倉：{res['pnl_pct']:+.2f}% | {res['duration']}")
                 st.rerun()
 
-        # 清除全部
+        # 清除
         st.markdown("---")
         if st.button("🗑 清除全部交易日誌", key="clear_all_tl", type="secondary"):
-            st.session_state.trade_log        = []
-            st.session_state.calc_log         = []
-            st.session_state.decision_log     = []
+            for k in ["trade_log","calc_log","decision_log","psych_log"]:
+                st.session_state[k] = []
             st.session_state.open_trades      = {}
             st.session_state.trade_id_counter = 1
-            st.success("已清除全部交易日誌")
+            st.success("已清除")
             st.rerun()
 # ══════════════════════════════════════════════════════════════════════════════
 @st.cache_data(ttl=60)

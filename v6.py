@@ -2082,6 +2082,7 @@ def tl_log_psychology(symbol: str, emotion: str, note: str,
         st.session_state.psych_log = []
     st.session_state.psych_log.insert(0, entry)
     st.session_state.psych_log = st.session_state.psych_log[:200]
+def render_trading_log():
     """完整交易日誌系統 v3.0 - 四大核心模組"""
     st.markdown("---")
     st.markdown("""

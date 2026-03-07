@@ -2275,8 +2275,8 @@ def render_trading_log():
                 colors = ["#00ee66" if r>=0 else "#ff5566" for r in r_mults]
                 fig = go.Figure(go.Bar(y=r_mults, marker_color=colors, opacity=0.85, marker_line_width=0))
                 fig.add_hline(y=0, line_color="#334455", line_width=1)
-                fig.add_hline(y=1, line_color="#00ee6644", line_width=1, line_dash="dot")
-                fig.add_hline(y=2, line_color="#ffdd4444", line_width=1, line_dash="dot")
+                fig.add_hline(y=1, line_color="rgba(0,238,102,0.25)", line_width=1, line_dash="dot")
+                fig.add_hline(y=2, line_color="rgba(255,221,68,0.25)", line_width=1, line_dash="dot")
                 fig.update_layout(paper_bgcolor="#0a0e18", plot_bgcolor="#0c1220",
                                   font=dict(color="#7799cc",family="monospace"),
                                   height=220, margin=dict(l=40,r=10,t=10,b=30),

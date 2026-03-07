@@ -2199,10 +2199,10 @@ def render_trading_log():
         rc1, rc2 = st.columns([1,2])
         with rc1:
             st.markdown("**⚙️ 風控參數**")
-            acct_size  = st.number_input("帳戶資金 ($)", value=float(st.session_state.get("acct_size",100000)), step=1000.0, key="acct_size")
-            risk_pct   = st.number_input("單筆風險 %", value=float(st.session_state.get("risk_pct",1.0)), step=0.1, min_value=0.1, max_value=5.0, key="risk_pct")
-            st.session_state["acct_size"] = acct_size
-            st.session_state["risk_pct"]  = risk_pct
+            acct_size  = st.number_input("帳戶資金 ($)", value=float(st.session_state.get("_acct_size",100000)), step=1000.0, key="_acct_size_input")
+            risk_pct   = st.number_input("單筆風險 %", value=float(st.session_state.get("_risk_pct",1.0)), step=0.1, min_value=0.1, max_value=5.0, key="_risk_pct_input")
+            st.session_state["_acct_size"] = acct_size
+            st.session_state["_risk_pct"]  = risk_pct
             max_risk_amt = acct_size * risk_pct / 100
             st.markdown(f"""
             <div style="background:#0c1220;border:1px solid #1e3050;border-radius:8px;padding:12px;margin-top:8px;font-family:monospace;">
@@ -2554,8 +2554,8 @@ def render_trading_log():
                 risk_per  = abs(na_ep - na_sl)
                 reward    = abs(na_tp - na_ep)
                 rr_ratio  = reward/risk_per if risk_per > 0 else 0
-                acct      = st.session_state.get("acct_size",100000)
-                rp        = st.session_state.get("risk_pct",1.0)
+                acct      = st.session_state.get("_acct_size",100000)
+                rp        = st.session_state.get("_risk_pct",1.0)
                 max_loss  = acct * rp / 100
                 suggest_sz= int(max_loss / risk_per) if risk_per > 0 else 0
 

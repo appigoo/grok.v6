@@ -312,8 +312,15 @@ MA_CONFIGS = [(5, "#ffffff", "dash"), (15, "#ffdd66", "dot")]
 # ══════════════════════════════════════════════════════════════════════════════
 # Session State
 # ══════════════════════════════════════════════════════════════════════════════
-if "alert_log"   not in st.session_state: st.session_state.alert_log   = []
-if "sent_alerts" not in st.session_state: st.session_state.sent_alerts = set()
+if "alert_log"    not in st.session_state: st.session_state.alert_log    = []
+if "sent_alerts"  not in st.session_state: st.session_state.sent_alerts  = set()
+
+# ── 交易日誌系統 Session State ───────────────────────────────────────────────
+if "trade_log"        not in st.session_state: st.session_state.trade_log        = []  # 交易記錄
+if "calc_log"         not in st.session_state: st.session_state.calc_log         = []  # 計算步驟日誌
+if "decision_log"     not in st.session_state: st.session_state.decision_log     = []  # 決策日誌
+if "open_trades"      not in st.session_state: st.session_state.open_trades      = {}  # 未平倉交易
+if "trade_id_counter" not in st.session_state: st.session_state.trade_id_counter = 1   # 交易ID計數器
 
 # ══════════════════════════════════════════════════════════════════════════════
 # 市場環境數據
@@ -1842,14 +1849,647 @@ def add_alert(symbol: str, period: str, msg: str, atype: str = "info"):
     now = datetime.now().strftime("%H:%M:%S")
     key = f"{symbol}|{period}|{msg}"
     if key not in st.session_state.sent_alerts:
+        # ── 衝突偵測：同一 symbol+period 內是否已有反向訊號 ──────────────────
+        conflict_note = ""
+        recent_same = [
+            a for a in st.session_state.alert_log[:10]
+            if a["股票"] == symbol and a["週期"] == period
+        ]
+        if recent_same:
+            opposite = {"bull": "bear", "bear": "bull"}
+            has_opposite = any(a["類型"] == opposite.get(atype) for a in recent_same)
+            if has_opposite:
+                if atype == "bull":
+                    conflict_note = "　⚡【多空分歧】同時存在空頭訊號，短多但中線謹慎，勿重倉！"
+                elif atype == "bear":
+                    conflict_note = "　⚡【多空分歧】同時存在多頭訊號，注意支撐，空單設好止損！"
+        final_msg = msg + conflict_note
         st.session_state.alert_log.insert(0,
-            {"時間": now, "股票": symbol, "週期": period, "訊息": msg, "類型": atype})
+            {"時間": now, "股票": symbol, "週期": period, "訊息": final_msg, "類型": atype})
         st.session_state.alert_log = st.session_state.alert_log[:200]
         st.session_state.sent_alerts.add(key)
-        send_telegram(f"📊 [{symbol} {period}] {msg}")
+        send_telegram(f"📊 [{symbol} {period}] {final_msg}")
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 數據抓取
+# 交易日誌系統（Trading Log System）
+# 記錄：計算步驟 → 訊號決策 → 交易記錄 → 績效統計
+# ══════════════════════════════════════════════════════════════════════════════
+
+def tl_log_calc(symbol: str, period: str, step: str, detail: str,
+                value=None, unit: str = "", level: str = "info"):
+    """
+    記錄計算步驟日誌
+    level: info / trigger / skip / error
+    """
+    entry = {
+        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3],
+        "symbol":    symbol,
+        "period":    period,
+        "step":      step,
+        "detail":    detail,
+        "value":     value,
+        "unit":      unit,
+        "level":     level,
+    }
+    st.session_state.calc_log.insert(0, entry)
+    st.session_state.calc_log = st.session_state.calc_log[:500]
+
+
+def tl_log_decision(symbol: str, period: str, detector: str,
+                    triggered: bool, reason: str,
+                    signal_type: str = "info", confidence: int = 50,
+                    key_values: dict = None):
+    """
+    記錄偵測器決策日誌
+    detector:    偵測器名稱（如 E0, I2, G7...）
+    triggered:   是否觸發
+    reason:      觸發/未觸發原因
+    confidence:  信心度 0-100
+    key_values:  關鍵計算值 dict
+    """
+    entry = {
+        "timestamp":   datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "symbol":      symbol,
+        "period":      period,
+        "detector":    detector,
+        "triggered":   triggered,
+        "signal_type": signal_type,
+        "reason":      reason,
+        "confidence":  confidence,
+        "key_values":  key_values or {},
+    }
+    st.session_state.decision_log.insert(0, entry)
+    st.session_state.decision_log = st.session_state.decision_log[:300]
+
+
+def tl_open_trade(symbol: str, direction: str, entry_price: float,
+                  entry_time: str = None, size: float = 1.0,
+                  stop_loss: float = None, take_profit: float = None,
+                  reason: str = "", signals: list = None,
+                  period: str = "") -> str:
+    """
+    開倉記錄
+    direction: LONG / SHORT
+    返回 trade_id
+    """
+    tid = f"T{st.session_state.trade_id_counter:04d}"
+    st.session_state.trade_id_counter += 1
+    now = entry_time or datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    trade = {
+        "trade_id":    tid,
+        "symbol":      symbol,
+        "direction":   direction,
+        "entry_price": entry_price,
+        "entry_time":  now,
+        "size":        size,
+        "stop_loss":   stop_loss,
+        "take_profit": take_profit,
+        "entry_reason": reason,
+        "entry_signals": signals or [],
+        "period":      period,
+        "status":      "OPEN",
+        "exit_price":  None,
+        "exit_time":   None,
+        "exit_reason": None,
+        "pnl":         None,
+        "pnl_pct":     None,
+        "duration":    None,
+        "calc_steps":  [],   # 開倉時的計算快照
+    }
+    st.session_state.open_trades[tid] = trade
+    st.session_state.trade_log.insert(0, trade)
+    st.session_state.trade_log = st.session_state.trade_log[:200]
+    return tid
+
+
+def tl_close_trade(trade_id: str, exit_price: float,
+                   exit_time: str = None, reason: str = "") -> dict:
+    """
+    平倉記錄，計算損益
+    返回平倉後的 trade dict
+    """
+    if trade_id not in st.session_state.open_trades:
+        return {}
+
+    trade = st.session_state.open_trades[trade_id]
+    now   = exit_time or datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    ep  = trade["entry_price"]
+    xp  = exit_price
+    sz  = trade["size"]
+    dir = trade["direction"]
+
+    raw_pnl = (xp - ep) if dir == "LONG" else (ep - xp)
+    pnl     = raw_pnl * sz
+    pnl_pct = raw_pnl / ep * 100
+
+    # 計算持倉時間
+    try:
+        t0 = datetime.strptime(trade["entry_time"], "%Y-%m-%d %H:%M:%S")
+        t1 = datetime.strptime(now,                 "%Y-%m-%d %H:%M:%S")
+        dur_min = int((t1 - t0).total_seconds() / 60)
+        duration = f"{dur_min}分鐘" if dur_min < 60 else f"{dur_min//60}時{dur_min%60}分"
+    except Exception:
+        duration = "N/A"
+
+    trade.update({
+        "status":      "CLOSED",
+        "exit_price":  exit_price,
+        "exit_time":   now,
+        "exit_reason": reason,
+        "pnl":         round(pnl, 4),
+        "pnl_pct":     round(pnl_pct, 3),
+        "duration":    duration,
+    })
+
+    # 從未平倉中移除
+    del st.session_state.open_trades[trade_id]
+
+    # 更新 trade_log 中的記錄
+    for i, t in enumerate(st.session_state.trade_log):
+        if t["trade_id"] == trade_id:
+            st.session_state.trade_log[i] = trade
+            break
+
+    return trade
+
+
+def tl_calc_stats() -> dict:
+    """計算整體績效統計"""
+    closed = [t for t in st.session_state.trade_log if t["status"] == "CLOSED"]
+    if not closed:
+        return {"total": 0}
+
+    pnls     = [t["pnl_pct"] for t in closed if t["pnl_pct"] is not None]
+    wins     = [p for p in pnls if p > 0]
+    losses   = [p for p in pnls if p <= 0]
+    total    = len(pnls)
+    win_rate = len(wins) / total * 100 if total > 0 else 0
+    avg_win  = sum(wins)  / len(wins)  if wins   else 0
+    avg_loss = sum(losses)/ len(losses)if losses  else 0
+    profit_factor = abs(sum(wins) / sum(losses)) if sum(losses) != 0 else float("inf")
+    total_pnl_pct = sum(pnls)
+
+    # 最大回撤
+    cumulative = []
+    cum = 0
+    for p in reversed(pnls):
+        cum += p
+        cumulative.append(cum)
+    peak = 0
+    max_dd = 0
+    for c in cumulative:
+        if c > peak: peak = c
+        dd = peak - c
+        if dd > max_dd: max_dd = dd
+
+    return {
+        "total":          total,
+        "wins":           len(wins),
+        "losses":         len(losses),
+        "win_rate":       round(win_rate, 1),
+        "avg_win":        round(avg_win, 3),
+        "avg_loss":       round(avg_loss, 3),
+        "profit_factor":  round(profit_factor, 2),
+        "total_pnl_pct":  round(total_pnl_pct, 3),
+        "max_drawdown":   round(max_dd, 3),
+        "expectancy":     round(win_rate/100*avg_win + (1-win_rate/100)*avg_loss, 3),
+    }
+
+
+def render_trading_log():
+    """渲染完整交易日誌面板"""
+    st.markdown("---")
+
+    # ── 標題 ─────────────────────────────────────────────────────────────────
+    st.markdown("""
+    <div style="display:flex;align-items:center;gap:12px;margin-bottom:20px;">
+      <div style="font-size:1.6rem;font-weight:900;color:#e0e8ff;
+                  letter-spacing:-0.5px;font-family:'Courier New',monospace;">
+        📒 TRADING LOG
+      </div>
+      <div style="font-size:0.75rem;color:#445577;padding:3px 10px;
+                  border:1px solid #223355;border-radius:20px;font-family:monospace;">
+        SYSTEM v2.0
+      </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    tl_tabs = st.tabs(["📈 交易記錄", "🧮 計算日誌", "🎯 決策日誌", "📊 績效統計", "➕ 手動記錄"])
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # TAB 1: 交易記錄
+    # ══════════════════════════════════════════════════════════════════════════
+    with tl_tabs[0]:
+        open_tr  = st.session_state.open_trades
+        all_log  = st.session_state.trade_log
+
+        # 未平倉
+        if open_tr:
+            st.markdown(f"#### 🟡 未平倉交易（{len(open_tr)} 筆）")
+            for tid, t in open_tr.items():
+                dir_col = "#00ee66" if t["direction"] == "LONG" else "#ff5566"
+                dir_lbl = "▲ LONG" if t["direction"] == "LONG" else "▼ SHORT"
+                sl_str  = f"{t['stop_loss']:.2f}"  if t["stop_loss"]  else "—"
+                tp_str  = f"{t['take_profit']:.2f}" if t["take_profit"] else "—"
+                sigs    = "、".join(t["entry_signals"][:3]) if t["entry_signals"] else "手動"
+
+                st.markdown(f"""
+                <div style="background:#0c1220;border:1px solid {dir_col}44;
+                            border-left:3px solid {dir_col};border-radius:8px;
+                            padding:12px 16px;margin:6px 0;font-family:monospace;">
+                  <div style="display:flex;justify-content:space-between;align-items:center;">
+                    <div>
+                      <span style="color:#7799cc;font-size:0.75rem;">{tid}</span>
+                      <span style="color:{dir_col};font-weight:700;margin-left:10px;">{dir_lbl}</span>
+                      <span style="color:#ccd6ee;font-weight:700;margin-left:8px;">{t['symbol']}</span>
+                      <span style="color:#667799;margin-left:8px;font-size:0.8rem;">{t['period']}</span>
+                    </div>
+                    <span style="background:#1a2a1a;color:#ffdd44;border-radius:4px;
+                                 padding:2px 8px;font-size:0.75rem;">⏳ OPEN</span>
+                  </div>
+                  <div style="display:flex;gap:24px;margin-top:8px;font-size:0.82rem;">
+                    <div><span style="color:#445577;">進場</span>
+                         <span style="color:#ccd6ee;margin-left:6px;font-weight:600;">${t['entry_price']:.2f}</span></div>
+                    <div><span style="color:#445577;">時間</span>
+                         <span style="color:#aabbcc;margin-left:6px;">{t['entry_time']}</span></div>
+                    <div><span style="color:#ff4444;">SL</span>
+                         <span style="color:#ff8888;margin-left:6px;">{sl_str}</span></div>
+                    <div><span style="color:#44dd88;">TP</span>
+                         <span style="color:#88ffbb;margin-left:6px;">{tp_str}</span></div>
+                  </div>
+                  <div style="margin-top:6px;font-size:0.75rem;color:#556688;">
+                    信號：{sigs}
+                  </div>
+                  <div style="margin-top:4px;font-size:0.75rem;color:#445566;">
+                    原因：{t.get('entry_reason','—')}
+                  </div>
+                </div>
+                """, unsafe_allow_html=True)
+
+                # 平倉表單
+                with st.expander(f"平倉 {tid}", expanded=False):
+                    c1, c2 = st.columns([2, 2])
+                    with c1:
+                        exit_px = st.number_input(f"出場價格 ({tid})", value=float(t["entry_price"]), step=0.01, key=f"exit_px_{tid}")
+                    with c2:
+                        exit_reason = st.text_input("平倉原因", value="", key=f"exit_reason_{tid}")
+                    if st.button(f"✅ 確認平倉 {tid}", key=f"close_{tid}", type="primary"):
+                        result = tl_close_trade(tid, exit_px, reason=exit_reason)
+                        pnl_c  = "#00ee66" if result["pnl_pct"] >= 0 else "#ff5566"
+                        st.success(f"已平倉 {tid}：損益 {result['pnl_pct']:+.2f}%（{result['pnl']:+.4f}）")
+                        st.rerun()
+        else:
+            st.info("目前無未平倉交易")
+
+        # 已平倉歷史
+        closed_log = [t for t in all_log if t["status"] == "CLOSED"]
+        if closed_log:
+            st.markdown(f"#### 📋 已平倉記錄（{len(closed_log)} 筆）")
+            rows = []
+            for t in closed_log:
+                pnl_pct = t.get("pnl_pct", 0) or 0
+                rows.append({
+                    "ID":      t["trade_id"],
+                    "股票":    t["symbol"],
+                    "方向":    t["direction"],
+                    "週期":    t.get("period","—"),
+                    "進場價":  t["entry_price"],
+                    "出場價":  t.get("exit_price","—"),
+                    "損益%":   f"{pnl_pct:+.2f}%",
+                    "持倉":    t.get("duration","—"),
+                    "進場時間": t["entry_time"],
+                    "平倉原因": t.get("exit_reason","—"),
+                })
+            df_closed = pd.DataFrame(rows)
+
+            def _color_pnl(val):
+                if "+" in str(val): return "color: #00ee66; font-weight: bold"
+                if "-" in str(val): return "color: #ff5566; font-weight: bold"
+                return ""
+
+            st.dataframe(
+                df_closed.style.applymap(_color_pnl, subset=["損益%"]),
+                use_container_width=True, height=300
+            )
+
+            # CSV 下載
+            csv_tl = df_closed.to_csv(index=False, encoding="utf-8-sig")
+            st.download_button("📥 下載交易記錄 CSV", csv_tl,
+                               file_name=f"trade_log_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
+                               mime="text/csv")
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # TAB 2: 計算日誌
+    # ══════════════════════════════════════════════════════════════════════════
+    with tl_tabs[1]:
+        calc_l = st.session_state.calc_log
+        if not calc_l:
+            st.info("暫無計算日誌。計算日誌會在偵測器運行時自動記錄。")
+        else:
+            # 過濾控件
+            fc1, fc2, fc3 = st.columns(3)
+            with fc1:
+                syms_c = ["全部"] + sorted(set(e["symbol"] for e in calc_l))
+                f_sym  = st.selectbox("股票", syms_c, key="calc_f_sym")
+            with fc2:
+                levels = ["全部", "trigger", "info", "skip", "error"]
+                f_lvl  = st.selectbox("類型", levels, key="calc_f_lvl")
+            with fc3:
+                steps_c = ["全部"] + sorted(set(e["step"] for e in calc_l))
+                f_step  = st.selectbox("計算步驟", steps_c[:20], key="calc_f_step")
+
+            filtered = [
+                e for e in calc_l
+                if (f_sym  == "全部" or e["symbol"] == f_sym)
+                and (f_lvl  == "全部" or e["level"]  == f_lvl)
+                and (f_step == "全部" or e["step"]   == f_step)
+            ]
+
+            level_styles = {
+                "trigger": ("background:#0d2a18;border-left:3px solid #00dd66;", "#00dd66"),
+                "info":    ("background:#0c1220;border-left:3px solid #336699;", "#6699bb"),
+                "skip":    ("background:#141414;border-left:3px solid #334455;", "#445566"),
+                "error":   ("background:#2a0d0d;border-left:3px solid #ff4444;", "#ff4444"),
+            }
+
+            st.markdown(f"**顯示 {len(filtered)} 筆 / 共 {len(calc_l)} 筆**")
+            for e in filtered[:100]:
+                sty, col = level_styles.get(e["level"], level_styles["info"])
+                val_str  = f'　→ <span style="color:#ffdd44;font-weight:600;">{e["value"]} {e["unit"]}</span>' if e["value"] is not None else ""
+                st.markdown(f"""
+                <div style="{sty}border-radius:4px;padding:6px 12px;
+                             margin:3px 0;font-family:monospace;font-size:0.78rem;">
+                  <span style="color:#445566;">{e['timestamp']}</span>
+                  <span style="color:#8899aa;margin:0 8px;">[{e['symbol']} {e['period']}]</span>
+                  <span style="color:{col};font-weight:600;">{e['step']}</span>
+                  <span style="color:#8899bb;margin-left:8px;">{e['detail']}</span>
+                  {val_str}
+                </div>
+                """, unsafe_allow_html=True)
+
+            if st.button("🗑 清除計算日誌", key="clear_calc_log"):
+                st.session_state.calc_log = []
+                st.rerun()
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # TAB 3: 決策日誌
+    # ══════════════════════════════════════════════════════════════════════════
+    with tl_tabs[2]:
+        dec_l = st.session_state.decision_log
+        if not dec_l:
+            st.info("暫無決策日誌。每次偵測器評估都會在此記錄。")
+        else:
+            # 統計：各偵測器觸發率
+            from collections import Counter
+            det_triggered = Counter(e["detector"] for e in dec_l if e["triggered"])
+            det_total     = Counter(e["detector"] for e in dec_l)
+            det_rates = {
+                d: round(det_triggered.get(d,0) / det_total[d] * 100, 1)
+                for d in det_total
+            }
+
+            st.markdown("#### 🔬 偵測器觸發率統計")
+            rate_html = ['<div style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:16px;">']
+            for det in sorted(det_total.keys()):
+                rate = det_rates[det]
+                cnt  = det_total[det]
+                trig = det_triggered.get(det, 0)
+                col  = "#00ee66" if rate > 60 else "#ffdd44" if rate > 20 else "#ff5566"
+                rate_html.append(f"""
+                <div style="background:#0c1220;border:1px solid {col}44;border-radius:6px;
+                             padding:6px 10px;font-family:monospace;min-width:90px;text-align:center;">
+                  <div style="color:#ccd6ee;font-weight:700;font-size:0.85rem;">{det}</div>
+                  <div style="color:{col};font-size:1.1rem;font-weight:900;">{rate}%</div>
+                  <div style="color:#445566;font-size:0.7rem;">{trig}/{cnt}</div>
+                </div>""")
+            rate_html.append("</div>")
+            st.markdown("".join(rate_html), unsafe_allow_html=True)
+
+            # 決策記錄列表
+            fd1, fd2 = st.columns(2)
+            with fd1:
+                syms_d = ["全部"] + sorted(set(e["symbol"] for e in dec_l))
+                f_sym_d = st.selectbox("股票", syms_d, key="dec_f_sym")
+            with fd2:
+                f_trig = st.selectbox("狀態", ["全部", "已觸發", "未觸發"], key="dec_f_trig")
+
+            filtered_d = [
+                e for e in dec_l
+                if (f_sym_d == "全部" or e["symbol"] == f_sym_d)
+                and (f_trig == "全部"
+                     or (f_trig == "已觸發" and e["triggered"])
+                     or (f_trig == "未觸發" and not e["triggered"]))
+            ]
+
+            for e in filtered_d[:80]:
+                trig_style = ("background:#0d2218;border-left:3px solid #00cc55;", "✅", "#00cc55") \
+                             if e["triggered"] else \
+                             ("background:#0c1220;border-left:3px solid #334455;", "⬜", "#445566")
+                sty, icon, col = trig_style
+                sig_col = {"bull": "#00ee66", "bear": "#ff5566", "info": "#6699bb", "vol": "#cc88ff"}.get(e["signal_type"], "#888")
+
+                kv_str = ""
+                if e["key_values"]:
+                    kv_parts = [f'<span style="color:#ffdd44;">{k}</span>=<span style="color:#aabbcc;">{v}</span>'
+                                for k, v in list(e["key_values"].items())[:6]]
+                    kv_str = f'<div style="margin-top:4px;font-size:0.72rem;color:#667788;">{"　".join(kv_parts)}</div>'
+
+                conf_bar = f'<div style="display:inline-block;width:{e["confidence"]}px;max-width:100px;height:3px;background:{col};border-radius:2px;vertical-align:middle;margin-left:6px;"></div>'
+
+                st.markdown(f"""
+                <div style="{sty}border-radius:6px;padding:8px 12px;margin:4px 0;font-family:monospace;">
+                  <div style="display:flex;justify-content:space-between;align-items:center;">
+                    <div>
+                      <span style="font-size:0.9rem;">{icon}</span>
+                      <span style="color:#8899aa;font-size:0.72rem;margin-left:6px;">{e['timestamp']}</span>
+                      <span style="color:{col};font-weight:700;margin-left:8px;">{e['detector']}</span>
+                      <span style="color:#ccd6ee;margin-left:8px;">{e['symbol']}</span>
+                      <span style="color:#556677;margin-left:6px;font-size:0.75rem;">{e['period']}</span>
+                    </div>
+                    <div style="display:flex;align-items:center;gap:8px;">
+                      <span style="color:{sig_col};font-size:0.72rem;border:1px solid {sig_col}44;
+                                   border-radius:3px;padding:1px 5px;">{e['signal_type']}</span>
+                      <span style="color:#667788;font-size:0.72rem;">信心{e['confidence']}%</span>
+                      {conf_bar}
+                    </div>
+                  </div>
+                  <div style="color:#8899aa;font-size:0.78rem;margin-top:4px;">{e['reason']}</div>
+                  {kv_str}
+                </div>
+                """, unsafe_allow_html=True)
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # TAB 4: 績效統計
+    # ══════════════════════════════════════════════════════════════════════════
+    with tl_tabs[3]:
+        stats = tl_calc_stats()
+        if stats.get("total", 0) == 0:
+            st.info("尚無已平倉交易，完成第一筆交易後績效統計將在此顯示。")
+        else:
+            total    = stats["total"]
+            wins     = stats["wins"]
+            losses   = stats["losses"]
+            wr       = stats["win_rate"]
+            pf       = stats["profit_factor"]
+            tot_pnl  = stats["total_pnl_pct"]
+            max_dd   = stats["max_drawdown"]
+            expect   = stats["expectancy"]
+            avg_w    = stats["avg_win"]
+            avg_l    = stats["avg_loss"]
+
+            wr_col   = "#00ee66" if wr >= 55 else "#ffdd44" if wr >= 40 else "#ff5566"
+            pnl_col  = "#00ee66" if tot_pnl >= 0 else "#ff5566"
+            pf_col   = "#00ee66" if pf >= 1.5 else "#ffdd44" if pf >= 1 else "#ff5566"
+
+            # KPI 卡片
+            st.markdown(f"""
+            <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin:12px 0;">
+              <div style="background:#0a1020;border:1px solid #1e3050;border-radius:10px;padding:16px;text-align:center;">
+                <div style="color:#445577;font-size:0.75rem;margin-bottom:4px;">總交易筆數</div>
+                <div style="color:#ccd6ee;font-size:2rem;font-weight:900;font-family:monospace;">{total}</div>
+                <div style="color:#445566;font-size:0.72rem;">勝{wins} / 敗{losses}</div>
+              </div>
+              <div style="background:#0a1020;border:1px solid {wr_col}44;border-radius:10px;padding:16px;text-align:center;">
+                <div style="color:#445577;font-size:0.75rem;margin-bottom:4px;">勝率</div>
+                <div style="color:{wr_col};font-size:2rem;font-weight:900;font-family:monospace;">{wr:.1f}%</div>
+                <div style="background:#141c2e;border-radius:3px;height:4px;margin-top:8px;">
+                  <div style="width:{wr}%;background:{wr_col};height:4px;border-radius:3px;"></div>
+                </div>
+              </div>
+              <div style="background:#0a1020;border:1px solid {pnl_col}44;border-radius:10px;padding:16px;text-align:center;">
+                <div style="color:#445577;font-size:0.75rem;margin-bottom:4px;">累計損益</div>
+                <div style="color:{pnl_col};font-size:2rem;font-weight:900;font-family:monospace;">{tot_pnl:+.2f}%</div>
+                <div style="color:#445566;font-size:0.72rem;">期望值 {expect:+.3f}%</div>
+              </div>
+              <div style="background:#0a1020;border:1px solid {pf_col}44;border-radius:10px;padding:16px;text-align:center;">
+                <div style="color:#445577;font-size:0.75rem;margin-bottom:4px;">獲利因子</div>
+                <div style="color:{pf_col};font-size:2rem;font-weight:900;font-family:monospace;">{pf:.2f}</div>
+                <div style="color:#ff5566;font-size:0.72rem;">最大回撤 -{max_dd:.2f}%</div>
+              </div>
+            </div>
+            """, unsafe_allow_html=True)
+
+            # 盈虧分布
+            st.markdown("#### 📊 盈虧分布")
+            closed_trades = [t for t in st.session_state.trade_log if t["status"] == "CLOSED"]
+            if len(closed_trades) >= 2:
+                pnl_series = [t["pnl_pct"] for t in reversed(closed_trades)]
+                cum_series = []
+                cum = 0
+                for p in pnl_series:
+                    cum += p
+                    cum_series.append(cum)
+
+                import plotly.graph_objects as go
+                fig = go.Figure()
+                colors = ["#00ee66" if p >= 0 else "#ff5566" for p in pnl_series]
+                fig.add_trace(go.Bar(y=pnl_series, name="單筆損益%", marker_color=colors,
+                                     marker_line_width=0, opacity=0.8))
+                fig.add_trace(go.Scatter(y=cum_series, name="累計損益%", mode="lines",
+                                         line=dict(color="#66bbff", width=2)))
+                fig.update_layout(
+                    paper_bgcolor="#0a0e18", plot_bgcolor="#0c1220",
+                    font=dict(color="#7799cc", family="monospace"),
+                    height=280, margin=dict(l=40,r=20,t=20,b=30),
+                    legend=dict(orientation="h", y=1.1),
+                    yaxis=dict(gridcolor="#1a2535", zeroline=True, zerolinecolor="#334455"),
+                    xaxis=dict(gridcolor="#1a2535"),
+                )
+                st.plotly_chart(fig, use_container_width=True)
+
+            # 詳細統計表
+            st.markdown(f"""
+            <div style="background:#0c1220;border:1px solid #1e2e48;border-radius:8px;
+                        padding:14px 20px;font-family:monospace;font-size:0.82rem;">
+              <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;">
+                <div><span style="color:#445577;">平均獲利</span>
+                     <span style="color:#00ee66;font-weight:700;margin-left:12px;">+{avg_w:.3f}%</span></div>
+                <div><span style="color:#445577;">平均虧損</span>
+                     <span style="color:#ff5566;font-weight:700;margin-left:12px;">{avg_l:.3f}%</span></div>
+                <div><span style="color:#445577;">盈虧比</span>
+                     <span style="color:#ffdd44;font-weight:700;margin-left:12px;">
+                       {abs(avg_w/avg_l):.2f}:1</span></div>
+                <div><span style="color:#445577;">最大回撤</span>
+                     <span style="color:#ff8855;font-weight:700;margin-left:12px;">-{max_dd:.3f}%</span></div>
+                <div><span style="color:#445577;">期望值/筆</span>
+                     <span style="color:{'#00ee66' if expect>=0 else '#ff5566'};font-weight:700;margin-left:12px;">
+                       {expect:+.3f}%</span></div>
+                <div><span style="color:#445577;">獲利因子</span>
+                     <span style="color:{pf_col};font-weight:700;margin-left:12px;">{pf:.2f}</span></div>
+              </div>
+            </div>
+            """, unsafe_allow_html=True)
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # TAB 5: 手動記錄交易
+    # ══════════════════════════════════════════════════════════════════════════
+    with tl_tabs[4]:
+        st.markdown("#### ✍️ 手動記錄交易")
+        st.caption("用於手動記錄在外部平台執行的交易，或補錄歷史交易")
+
+        m1, m2, m3 = st.columns(3)
+        with m1:
+            m_sym  = st.text_input("股票代號", value="TSLA", key="m_sym").upper()
+            m_dir  = st.selectbox("方向", ["LONG", "SHORT"], key="m_dir")
+        with m2:
+            m_ep   = st.number_input("進場價格", value=400.0, step=0.01, key="m_ep")
+            m_sz   = st.number_input("部位大小（股數）", value=1.0, step=0.5, key="m_sz", min_value=0.1)
+        with m3:
+            m_sl   = st.number_input("止損價格（0=不設）", value=0.0, step=0.01, key="m_sl")
+            m_tp   = st.number_input("目標價格（0=不設）", value=0.0, step=0.01, key="m_tp")
+
+        m_reason = st.text_input("進場原因（訊號/策略）", key="m_reason",
+                                  placeholder="例：G7爆量突破+EMA5金叉，突破399阻力線")
+        m_period = st.text_input("時間週期", value="日K", key="m_period")
+
+        if st.button("📝 記錄開倉", type="primary", key="m_open"):
+            if m_sym and m_ep > 0:
+                tid = tl_open_trade(
+                    symbol=m_sym, direction=m_dir,
+                    entry_price=m_ep, size=m_sz,
+                    stop_loss=m_sl if m_sl > 0 else None,
+                    take_profit=m_tp if m_tp > 0 else None,
+                    reason=m_reason, period=m_period,
+                    signals=m_reason.split("，") if m_reason else [],
+                )
+                st.success(f"✅ 已記錄開倉 {tid}：{m_dir} {m_sym} @ {m_ep:.2f}")
+                tl_log_calc(m_sym, m_period, "手動開倉", f"{m_dir} @ {m_ep}", m_ep, "USD", "trigger")
+                st.rerun()
+            else:
+                st.error("請填寫股票代號和進場價格")
+
+        # 快速平倉
+        if st.session_state.open_trades:
+            st.markdown("---")
+            st.markdown("#### 🔒 快速平倉")
+            q1, q2, q3 = st.columns(3)
+            with q1:
+                q_tid = st.selectbox("選擇交易", list(st.session_state.open_trades.keys()), key="q_tid")
+            with q2:
+                q_xp  = st.number_input("出場價格", value=400.0, step=0.01, key="q_xp")
+            with q3:
+                q_rsn = st.text_input("平倉原因", key="q_rsn",
+                                       placeholder="例：止損觸發/目標達到/訊號反轉")
+            if st.button("🔒 確認平倉", type="secondary", key="q_close"):
+                res = tl_close_trade(q_tid, q_xp, reason=q_rsn)
+                pnl_c = "🟢" if res["pnl_pct"] >= 0 else "🔴"
+                st.success(f"{pnl_c} 平倉 {q_tid}：{res['pnl_pct']:+.2f}% / 持倉{res['duration']}")
+                tl_log_calc(res["symbol"], res.get("period",""), "手動平倉",
+                            f"@ {q_xp}", res["pnl_pct"], "%", "trigger")
+                st.rerun()
+
+        # 清除全部
+        st.markdown("---")
+        if st.button("🗑 清除全部交易日誌", key="clear_all_tl", type="secondary"):
+            st.session_state.trade_log        = []
+            st.session_state.calc_log         = []
+            st.session_state.decision_log     = []
+            st.session_state.open_trades      = {}
+            st.session_state.trade_id_counter = 1
+            st.success("已清除全部交易日誌")
+            st.rerun()
 # ══════════════════════════════════════════════════════════════════════════════
 @st.cache_data(ttl=60)
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1960,6 +2600,44 @@ def calc_rsi(series, period=14):
     loss  = (-delta.clip(upper=0)).rolling(period).mean()
     rs    = gain / loss.replace(0, np.nan)
     return 100 - 100 / (1 + rs)
+
+def calc_adx(df, period=14):
+    """
+    計算 ADX / +DI / -DI（趨勢強度與方向）
+    ADX>25 趨勢有效；-DI>+DI 空頭主導；+DI>-DI 多頭主導
+    """
+    try:
+        hi = df["High"]; lo = df["Low"]; cl = df["Close"]
+        tr = pd.concat([
+            (hi - lo),
+            (hi - cl.shift(1)).abs(),
+            (lo - cl.shift(1)).abs()
+        ], axis=1).max(axis=1)
+        up = hi.diff(); dn = -lo.diff()
+        pdm = up.where((up > dn) & (up > 0), 0.0)
+        ndm = dn.where((dn > up) & (dn > 0), 0.0)
+        atr = tr.ewm(com=period-1, adjust=False).mean()
+        pdi = 100 * pdm.ewm(com=period-1, adjust=False).mean() / atr.replace(0, np.nan)
+        ndi = 100 * ndm.ewm(com=period-1, adjust=False).mean() / atr.replace(0, np.nan)
+        dx  = ((pdi - ndi).abs() / (pdi + ndi).replace(0, np.nan)) * 100
+        adx = dx.ewm(com=period-1, adjust=False).mean()
+        return adx, pdi, ndi
+    except Exception:
+        empty = pd.Series([np.nan]*len(df))
+        return empty, empty, empty
+
+def calc_willr(df, period=14):
+    """
+    Williams %R：範圍 -100~0
+    < -80 超賣（潛在反彈）；> -20 超買（潛在回落）
+    """
+    try:
+        hi_max = df["High"].rolling(period).max()
+        lo_min = df["Low"].rolling(period).min()
+        rng = hi_max - lo_min
+        return -100 * (hi_max - df["Close"]) / rng.replace(0, np.nan)
+    except Exception:
+        return pd.Series([np.nan]*len(df))
 
 
 def calc_pivot(df, interval: str = "1d"):
@@ -2407,6 +3085,12 @@ def run_alerts(symbol, period_label, df, trigger_ai=False, mkt=None):
                               f"，EMA5止跌＋DIF轉向，均線翻多前最早期入場機會"
                               f"｜{'＋'.join(_e0_tags)}，注意確認後再加倉！", "bull")
                     new_signals.append(f"底部反彈初訊+{_e0_recovery:.2f}%")
+                    tl_log_decision(symbol, period_label, "E0",
+                                    triggered=True, signal_type="bull",
+                                    reason=f"空頭排列底部反彈：低點{_e0_low_val:.2f}→{_e0_price:.2f}(+{_e0_recovery:.2f}%)",
+                                    confidence=60,
+                                    key_values={"EMA5止跌": _e0_e5_turning, "DIF轉向": _e0_dif_turn,
+                                                "反彈幅度": f"{_e0_recovery:.2f}%", "低點位置": _e0_low_idx})
         except Exception:
             pass
     if len(close) >= 20:
@@ -2744,7 +3428,40 @@ def run_alerts(symbol, period_label, df, trigger_ai=False, mkt=None):
                               f"，深度越深反轉力度越強，底部反彈確認！", "bull")
                     new_signals.append(f"MACD深谷金叉{_dif_min:.2f}")
 
-    # C4. EMA5/EMA10 黃金/死亡交叉（短線反轉確認）
+    # C3d. MACD 深谷震盪底（圖中特殊場景：DIF=-7.37但柱→-0.099，DIF與DEA快要貼合）
+    # 與C3c不同：C3c是「剛完成金叉」，C3d是「即將金叉但DIF仍在極深位，需謹慎」
+    if len(hist) >= 10 and len(dif_s) >= 10:
+        _c3d_dif_cur   = float(dif_s.iloc[-1])
+        _c3d_dea_cur   = float(dea_s.iloc[-1])
+        _c3d_hist_cur  = float(hist.iloc[-1])
+        _c3d_hist_min  = float(hist.iloc[-40:].min()) if len(hist) >= 40 else float(hist.min())
+        _c3d_hist_range = abs(_c3d_hist_min)
+
+        # 條件：DIF在極深負值（<-3），但柱已收縮至不足原來10%（即將金叉）
+        _c3d_deep_dif   = _c3d_dif_cur < -3.0
+        _c3d_hist_tiny  = _c3d_hist_range > 0 and abs(_c3d_hist_cur) < _c3d_hist_range * 0.1
+        _c3d_near_cross = abs(_c3d_dif_cur - _c3d_dea_cur) < abs(_c3d_dif_cur) * 0.02  # 差距<2%
+        _c3d_dif_rising = float(dif_s.iloc[-1]) > float(dif_s.iloc[-3])  # DIF仍在上升
+
+        if _c3d_deep_dif and _c3d_hist_tiny and _c3d_near_cross:
+            _c3d_ck = f"{symbol}|{period_label}|MACD深谷震盪底|{df.index[-1].strftime('%Y%m%d%H') if hasattr(df.index[-1],'strftime') else str(df.index[-1])[:13]}"
+            if _c3d_ck not in st.session_state.sent_alerts:
+                st.session_state.sent_alerts.add(_c3d_ck)
+                _recovery_pct = (abs(_c3d_hist_cur) / _c3d_hist_range) * 100
+                add_alert(symbol, period_label,
+                          f"⚡ 【MACD深谷震盪底】DIF={_c3d_dif_cur:.3f}（極深負值）"
+                          f"，MACD柱已從最深{_c3d_hist_min:.2f}收縮至{_c3d_hist_cur:.3f}"
+                          f"（僅剩{_recovery_pct:.1f}%），DIF即將與DEA={_c3d_dea_cur:.3f}金叉"
+                          f"，⚠️ 注意：DIF仍在極深位，非真實反轉！"
+                          f"需配合價格突破均線壓力帶才能確認{'（DIF持續上升中）' if _c3d_dif_rising else '（DIF未確認上升）'}", "info")
+                new_signals.append(f"MACD深谷震盪底DIF{_c3d_dif_cur:.1f}")
+                tl_log_decision(symbol, period_label, "C3d",
+                                triggered=True, signal_type="info",
+                                reason=f"DIF={_c3d_dif_cur:.2f}極深，柱剩{_recovery_pct:.1f}%，即將金叉但需謹慎",
+                                confidence=45,
+                                key_values={"DIF": _c3d_dif_cur, "DEA": _c3d_dea_cur,
+                                            "柱": _c3d_hist_cur, "柱最深": _c3d_hist_min,
+                                            "已收縮": f"{100-_recovery_pct:.0f}%"})
     if e5.iloc[-1] > e10.iloc[-1] and e5.iloc[-2] <= e10.iloc[-2]:
         add_alert(symbol, period_label,
                   "🔄 反轉訊號｜EMA5 上穿 EMA10（短線動能反轉向上）", "bull")
@@ -2832,6 +3549,187 @@ def run_alerts(symbol, period_label, df, trigger_ai=False, mkt=None):
         add_alert(symbol, period_label,
                   "⚠️ 頂部預警｜多頭 EMA 排列首次出現破口（趨勢轉弱開始）", "bear")
         new_signals.append("多頭排列破口")
+
+    # ── D5. 完整空頭排列確認（圖中核心場景：EMA5<10<20<30<60<120<200）────────
+    # D 節原有偵測器只抓「剛死叉瞬間」，但圖中已完成排列，持續壓制更重要
+    _e120 = calc_ema(close, 120)
+    _e200 = calc_ema(close, 200) if len(close) >= 200 else None
+
+    _e_now_ext = {5: e5.iloc[-1], 10: e10.iloc[-1], 20: e20.iloc[-1],
+                  30: e30.iloc[-1], 60: e60.iloc[-1]}
+    _e_now_ext[120] = float(_e120.iloc[-1])
+    if _e200 is not None:
+        _e_now_ext[200] = float(_e200.iloc[-1])
+
+    # 計算有幾層是空頭排列（由小到大均線依次遞增）
+    _bear_layers = []
+    _chain = [5, 10, 20, 30, 60, 120]
+    if _e200 is not None: _chain.append(200)
+    for i in range(len(_chain)-1):
+        a, b = _chain[i], _chain[i+1]
+        if _e_now_ext[a] < _e_now_ext[b]:
+            _bear_layers.append(f"EMA{a}<{b}")
+
+    # 完整空頭排列：5層以上（EMA5<10<20<30<60<120）
+    _full_bear_align = len(_bear_layers) >= 5
+    # 強化版：含EMA200（6層）
+    _ultra_bear_align = (len(_chain) >= 7 and len(_bear_layers) >= 6)
+
+    if _full_bear_align:
+        _d5_ck = f"{symbol}|{period_label}|完整空頭排列確認|{df.index[-1].strftime('%Y%m%d') if hasattr(df.index[-1],'strftime') else str(df.index[-1])[:10]}"
+        if _d5_ck not in st.session_state.sent_alerts:
+            st.session_state.sent_alerts.add(_d5_ck)
+            # 計算排列壓力帶：最低均線（EMA5）到最高均線的價差
+            _bear_top = max(_e_now_ext.values())     # 最高均線 = 最大阻力
+            _bear_bot = min(_e_now_ext.values())     # 最低均線 = 第一支撐
+            _align_spread = _bear_top - _bear_bot
+            _align_grade = "🚨 超強空頭" if _ultra_bear_align else "🔴 完整空頭"
+            add_alert(symbol, period_label,
+                      f"{_align_grade}排列｜{'→'.join(['EMA'+str(x) for x in _chain[:len(_bear_layers)+1]])}"
+                      f"（{len(_bear_layers)}層均線全部空頭排列）"
+                      f"，多頭反彈均面臨 {_bear_bot:.2f}-{_bear_top:.2f} 均線壓力帶（寬{_align_spread:.2f}）"
+                      f"，趨勢明確向下，反彈宜輕倉！", "bear")
+            new_signals.append(f"空頭排列{len(_bear_layers)}層確認")
+            tl_log_decision(symbol, period_label, "D5",
+                            triggered=True, signal_type="bear",
+                            reason=f"完整空頭排列{len(_bear_layers)}層，均線壓力帶{_bear_bot:.2f}-{_bear_top:.2f}",
+                            confidence=70 + len(_bear_layers) * 4,
+                            key_values={f"EMA{k}": round(v, 3) for k, v in sorted(_e_now_ext.items())
+                                        if k <= 60})
+
+    # ── D6. 反彈觸及均線壓力帶後拒絕下跌（均線壓制反彈失敗）────────────────
+    # 場景：上漲觸及 EMA5/10 附近，但收盤跌回 → 空頭排列壓制確認
+    if _full_bear_align and len(df) >= 3:
+        _d6_hi   = float(df["High"].iloc[-1]) if "High" in df.columns else price
+        _d6_op   = float(opn.iloc[-1])
+        _d6_cl   = price
+        # 上影線觸及某條均線，但收盤在開盤以下（看跌吞噬/上引線）
+        _upper_shadow = _d6_hi - max(_d6_op, _d6_cl)
+        _body         = abs(_d6_cl - _d6_op)
+        _d6_bear_candle = _d6_cl < _d6_op  # 陰線
+
+        # 找到高點觸及的均線
+        _rejected_ema = None
+        for _ema_p in [5, 10, 20, 30]:
+            _ev = _e_now_ext.get(_ema_p, 0)
+            if abs(_d6_hi - _ev) / _ev < 0.003 and _d6_cl < _ev:  # 高點碰到均線但收在下面
+                _rejected_ema = _ema_p
+                break
+
+        if _rejected_ema and _d6_bear_candle and _upper_shadow > _body * 0.5:
+            _d6_ck = f"{symbol}|{period_label}|反彈均線壓制|{df.index[-1].strftime('%Y%m%d%H') if hasattr(df.index[-1],'strftime') else str(df.index[-1])[:13]}"
+            if _d6_ck not in st.session_state.sent_alerts:
+                st.session_state.sent_alerts.add(_d6_ck)
+                add_alert(symbol, period_label,
+                          f"📉 【反彈被均線壓制】K線高點{_d6_hi:.2f}觸及 EMA{_rejected_ema}={_e_now_ext[_rejected_ema]:.2f}"
+                          f" 後收盤{_d6_cl:.2f}跌回均線下方"
+                          f"，上引線={_upper_shadow:.3f} 空頭排列壓制有效！"
+                          f"　做空機會，止損設於 EMA{_rejected_ema} 之上", "bear")
+                new_signals.append(f"反彈EMA{_rejected_ema}壓制")
+                tl_log_decision(symbol, period_label, "D6",
+                                triggered=True, signal_type="bear",
+                                reason=f"反彈至EMA{_rejected_ema}={_e_now_ext[_rejected_ema]:.2f}被壓制，陰線收{_d6_cl:.2f}",
+                                confidence=78,
+                                key_values={"觸及均線": f"EMA{_rejected_ema}", "高點": _d6_hi,
+                                            "收盤": _d6_cl, "上影線": round(_upper_shadow,3)})
+
+    # ── D7. EMA 長短期扭曲結構（圖中關鍵：EMA200在EMA5下方 + EMA120<EMA60）──
+    # 場景：EMA200=395 < EMA5=401，長期均線低於短期 → 長期底部還在下方
+    #       EMA120=415 < EMA60=422 → 中長線空頭扭曲（先下後上的中期下跌）
+    if len(close) >= 120:
+        _d7_e200 = float(calc_ema(close, 200).iloc[-1]) if len(close) >= 200 else None
+        _d7_e120 = float(calc_ema(close, 120).iloc[-1])
+        _d7_e60  = float(e60.iloc[-1])
+        _d7_e5   = float(e5.iloc[-1])
+        _d7_e20  = float(e20.iloc[-1])
+
+        # 情形1：EMA200低於EMA5（長線底部在短線下方 → 夾擊結構）
+        _d7_e200_below_short = _d7_e200 is not None and _d7_e200 < _d7_e5
+        # 情形2：EMA120 < EMA60（中長線倒序 → 空頭深度下跌扭曲）
+        _d7_mid_inverted = _d7_e120 < _d7_e60
+        # 情形3：整體均線離散度 > 5%（高度發散，趨勢強）
+        _all_emas = [_d7_e5, _d7_e20, _d7_e60, _d7_e120]
+        if _d7_e200: _all_emas.append(_d7_e200)
+        _d7_dispersion = (max(_all_emas) - min(_all_emas)) / min(_all_emas) * 100
+
+        if _d7_e200_below_short and _d7_mid_inverted:
+            _d7_ck = f"{symbol}|{period_label}|EMA長短期扭曲|{df.index[-1].strftime('%Y%m%d') if hasattr(df.index[-1],'strftime') else str(df.index[-1])[:10]}"
+            if _d7_ck not in st.session_state.sent_alerts:
+                st.session_state.sent_alerts.add(_d7_ck)
+                _squeeze = _d7_e60 - _d7_e200   # 夾擊空間
+                add_alert(symbol, period_label,
+                          f"⚠️ 【EMA長短期扭曲結構】EMA200={_d7_e200:.1f}（長線底部）"
+                          f"仍低於EMA5={_d7_e5:.1f}（短線）"
+                          f"，同時EMA120={_d7_e120:.1f}<EMA60={_d7_e60:.1f}（中長線空頭扭曲）"
+                          f"，價格夾在長線支撐({_d7_e200:.1f})與均線壓力帶({_d7_e5:.1f}-{_d7_e60:.1f})之間"
+                          f"，夾擊空間{_squeeze:.1f}點，趨勢混沌！"
+                          f"　均線離散度{_d7_dispersion:.1f}%（{'高度發散' if _d7_dispersion>5 else '正常'}）", "bear")
+                new_signals.append(f"EMA長短扭曲離散{_d7_dispersion:.0f}%")
+                tl_log_decision(symbol, period_label, "D7",
+                                triggered=True, signal_type="bear",
+                                reason=f"EMA200({_d7_e200:.1f})<EMA5({_d7_e5:.1f})且EMA120<EMA60，離散度{_d7_dispersion:.1f}%",
+                                confidence=72,
+                                key_values={"EMA200": round(_d7_e200,1), "EMA120": round(_d7_e120,1),
+                                            "EMA60": round(_d7_e60,1), "EMA5": round(_d7_e5,1),
+                                            "離散度": f"{_d7_dispersion:.1f}%", "夾擊空間": round(_squeeze,1)})
+
+        elif _d7_mid_inverted and not _d7_e200_below_short:
+            # 僅中長線扭曲（不含EMA200）
+            _d7b_ck = f"{symbol}|{period_label}|EMA中長扭曲|{df.index[-1].strftime('%Y%m%d') if hasattr(df.index[-1],'strftime') else str(df.index[-1])[:10]}"
+            if _d7b_ck not in st.session_state.sent_alerts:
+                st.session_state.sent_alerts.add(_d7b_ck)
+                add_alert(symbol, period_label,
+                          f"📊 【EMA中長期扭曲】EMA120={_d7_e120:.1f}<EMA60={_d7_e60:.1f}"
+                          f"（中長線空頭排列倒序），趨勢已有深度下跌後的技術性反彈特徵"
+                          f"，均線離散度{_d7_dispersion:.1f}%", "bear")
+                new_signals.append(f"EMA中長扭曲")
+
+    # ── D8. 均線離散度趨勢強度指標（Dispersion Index）─────────────────────────
+    # 均線越發散 → 趨勢越強；均線收斂 → 趨勢衰退，可能反轉
+    if len(close) >= 60:
+        _d8_emas = {5: float(e5.iloc[-1]), 10: float(e10.iloc[-1]),
+                    20: float(e20.iloc[-1]), 30: float(e30.iloc[-1]),
+                    60: float(e60.iloc[-1])}
+        _d8_prev_emas = {5: float(e5.iloc[-2]), 10: float(e10.iloc[-2]),
+                         20: float(e20.iloc[-2]), 30: float(e30.iloc[-2]),
+                         60: float(e60.iloc[-2])}
+
+        _d8_spread_now  = max(_d8_emas.values()) - min(_d8_emas.values())
+        _d8_spread_prev = max(_d8_prev_emas.values()) - min(_d8_prev_emas.values())
+
+        # 離散度百分比（相對於均值）
+        _d8_mean = sum(_d8_emas.values()) / len(_d8_emas)
+        _d8_di_pct = _d8_spread_now / _d8_mean * 100
+
+        # 離散度在擴大（趨勢加速）
+        _d8_expanding = _d8_spread_now > _d8_spread_prev * 1.05
+
+        # 空頭排列下的高離散度 = 空頭趨勢強度高
+        _d8_is_bear = _d8_emas[5] < _d8_emas[60]
+        _d8_ck_day  = df.index[-1].strftime('%Y%m%d') if hasattr(df.index[-1],'strftime') else str(df.index[-1])[:10]
+
+        if _d8_di_pct > 4 and _d8_is_bear:
+            _d8_ck = f"{symbol}|{period_label}|空頭均線高離散|{_d8_ck_day}"
+            if _d8_ck not in st.session_state.sent_alerts:
+                st.session_state.sent_alerts.add(_d8_ck)
+                _d8_grade = "🔴 極高強度" if _d8_di_pct > 7 else "⚠️ 高強度" if _d8_di_pct > 4 else "📊 中等"
+                add_alert(symbol, period_label,
+                          f"{_d8_grade}空頭趨勢｜EMA離散度={_d8_di_pct:.1f}%"
+                          f"（均線最高{max(_d8_emas.values()):.1f}"
+                          f"vs最低{min(_d8_emas.values()):.1f}，差{_d8_spread_now:.1f}點）"
+                          f"，{'離散擴大中（空頭加速）' if _d8_expanding else '離散收縮（趨勢減速）'}"
+                          f"，短線反彈空間受限於均線壓力帶！", "bear")
+                new_signals.append(f"空頭離散度{_d8_di_pct:.1f}%")
+
+        elif _d8_di_pct > 4 and not _d8_is_bear:
+            _d8_ck = f"{symbol}|{period_label}|多頭均線高離散|{_d8_ck_day}"
+            if _d8_ck not in st.session_state.sent_alerts:
+                st.session_state.sent_alerts.add(_d8_ck)
+                add_alert(symbol, period_label,
+                          f"🚀 強勢多頭趨勢｜EMA離散度={_d8_di_pct:.1f}%"
+                          f"（EMA5={_d8_emas[5]:.1f}領跑EMA60={_d8_emas[60]:.1f}）"
+                          f"，{'擴散加速，順勢持多！' if _d8_expanding else '擴散放緩，注意減速'}", "bull")
+                new_signals.append(f"多頭離散度{_d8_di_pct:.1f}%")
 
     # ════════════════════════════════════════════════════════════════════════
     # F. 跳空缺口偵測（掃描最近 N 根，捕捉日K/週K/月K 跳空）
@@ -3326,6 +4224,13 @@ def run_alerts(symbol, period_label, df, trigger_ai=False, mkt=None):
                                   f"，突破盤整高點{_g7_range_high:.2f}"
                                   f"，蓄力越久爆發越猛，趨勢啟動！", "bull")
                         new_signals.append(f"長盤整×{_g7_tight_bars}爆量×{_g7_vol_x:.0f}突破")
+                        conf = min(95, 60 + _g7_tight_bars//2 + int(_g7_vol_x)*2)
+                        tl_log_decision(symbol, period_label, "G7",
+                                        triggered=True, signal_type="bull",
+                                        reason=f"長盤整{_g7_tight_bars}根後爆量{_g7_vol_x:.1f}×突破高點{_g7_range_high:.2f}",
+                                        confidence=min(conf, 95),
+                                        key_values={"盤整根數": _g7_tight_bars, "量能倍數": f"{_g7_vol_x:.1f}x",
+                                                    "陽線漲幅": f"{_g7_bar_pct:+.2f}%", "突破高點": _g7_range_high})
 
                 # 空頭版：長盤整後放量跌破
                 elif (_g7_tight_pct >= 0.6 and _g7_tight_bars >= 15
@@ -3413,10 +4318,15 @@ def run_alerts(symbol, period_label, df, trigger_ai=False, mkt=None):
     # I. MACD 背離偵測（底背離/頂背離）
     # ══════════════════════════════════════════════════════════════════════════
     try:
-        if len(close) >= 40:
+        # 依時間週期動態調整窗口：日K兩個頂可能相距60根，分鐘級40根就夠
+        _i_window = 80 if any(x in period_label for x in ["日","1d","wk","mo","月","週","季","年"]) else 40
+        _i_since_max = 40 if any(x in period_label for x in ["日","1d","wk","mo","月","週","季","年"]) else 20
+
+        if len(close) >= _i_window // 2:
             _dif_i, _dea_i, _ = calc_macd(close)
-            _c40   = close.iloc[-40:]
-            _dif40 = _dif_i.iloc[-40:]
+            _n = min(_i_window, len(close))
+            _cN   = close.iloc[-_n:]
+            _difN = _dif_i.iloc[-_n:]
 
             def _find_lows(series):
                 vals = list(series.values)
@@ -3449,13 +4359,13 @@ def run_alerts(symbol, period_label, df, trigger_ai=False, mkt=None):
                 return merged[-2:] if len(merged) >= 2 else []
 
             # ── I1. MACD 底背離 ──────────────────────────────────────────────
-            _pl = _find_lows(_c40)
+            _pl = _find_lows(_cN)
             if len(_pl) >= 2:
-                _p1 = float(_c40.iloc[_pl[-2]]); _p2 = float(_c40.iloc[_pl[-1]])
-                _d1 = float(_dif40.iloc[_pl[-2]]); _d2 = float(_dif40.iloc[_pl[-1]])
-                _since = 39 - _pl[-1]
+                _p1 = float(_cN.iloc[_pl[-2]]); _p2 = float(_cN.iloc[_pl[-1]])
+                _d1 = float(_difN.iloc[_pl[-2]]); _d2 = float(_difN.iloc[_pl[-1]])
+                _since = (_n-1) - _pl[-1]
                 _dif_rising = float(_dif_i.iloc[-1]) > float(_dif_i.iloc[-1-min(3,len(_dif_i)-1)])
-                if (_p2 < _p1*0.9995 and _d2 > _d1*1.01 and _dif_rising and _since <= 20):
+                if (_p2 < _p1*0.9995 and _d2 > _d1*1.01 and _dif_rising and _since <= _i_since_max):
                     ck = f"{symbol}|{period_label}|MACD底背離|{df.index[-1].strftime('%Y%m%d%H') if hasattr(df.index[-1],'strftime') else str(df.index[-1])[:13]}"
                     if ck not in st.session_state.sent_alerts:
                         st.session_state.sent_alerts.add(ck)
@@ -3466,21 +4376,71 @@ def run_alerts(symbol, period_label, df, trigger_ai=False, mkt=None):
                         new_signals.append("MACD底背離")
 
             # ── I2. MACD 頂背離 ──────────────────────────────────────────────
-            _ph = _find_highs(_c40)
+            _ph = _find_highs(_cN)
             if len(_ph) >= 2:
-                _p1 = float(_c40.iloc[_ph[-2]]); _p2 = float(_c40.iloc[_ph[-1]])
-                _d1 = float(_dif40.iloc[_ph[-2]]); _d2 = float(_dif40.iloc[_ph[-1]])
-                _since = 39 - _ph[-1]
+                _p1 = float(_cN.iloc[_ph[-2]]); _p2 = float(_cN.iloc[_ph[-1]])
+                _d1 = float(_difN.iloc[_ph[-2]]); _d2 = float(_difN.iloc[_ph[-1]])
+                _since = (_n-1) - _ph[-1]
                 _dif_falling = float(_dif_i.iloc[-1]) < float(_dif_i.iloc[-1-min(3,len(_dif_i)-1)])
-                if (_p2 > _p1*1.0005 and _d2 < _d1*0.99 and _dif_falling and _since <= 20):
+                # 頂背離強度：DIF差距越大越可靠
+                _div_strength = (_d1 - _d2) / abs(_d1) * 100 if _d1 != 0 else 0
+                if (_p2 > _p1*1.0005 and _d2 < _d1*0.99 and _dif_falling and _since <= _i_since_max):
                     ck = f"{symbol}|{period_label}|MACD頂背離|{df.index[-1].strftime('%Y%m%d%H') if hasattr(df.index[-1],'strftime') else str(df.index[-1])[:13]}"
                     if ck not in st.session_state.sent_alerts:
                         st.session_state.sent_alerts.add(ck)
+                        if _div_strength > 50:
+                            _div_grade = "🚨 極強頂背離"
+                        elif _div_strength > 25:
+                            _div_grade = "⚠️ 強頂背離"
+                        else:
+                            _div_grade = "📉 頂背離"
                         add_alert(symbol, period_label,
-                                  f"📉 【MACD頂背離】價格創新高({_p1:.2f}→{_p2:.2f})"
-                                  f" 但DIF未創新高({_d1:.3f}→{_d2:.3f})"
-                                  f"，多頭動能衰竭，注意回落風險！", "bear")
-                        new_signals.append("MACD頂背離")
+                                  f"{_div_grade}｜價格創新高({_p1:.2f}→{_p2:.2f}，+{(_p2-_p1)/_p1*100:.1f}%)"
+                                  f" 但DIF大幅衰退({_d1:.2f}→{_d2:.2f}，-{_div_strength:.0f}%)"
+                                  f"，多頭動能嚴重衰竭，頂部反轉風險極高！", "bear")
+                        new_signals.append(f"MACD頂背離DIF衰退{_div_strength:.0f}%")
+                        tl_log_decision(symbol, period_label, "I2",
+                                        triggered=True, signal_type="bear",
+                                        reason=f"頂背離：價格{_p1:.2f}→{_p2:.2f}，DIF {_d1:.2f}→{_d2:.2f} 衰退{_div_strength:.0f}%",
+                                        confidence=min(50 + int(_div_strength//2), 95),
+                                        key_values={"高點1價格": _p1, "高點2價格": _p2,
+                                                    "DIF高點1": round(_d1,2), "DIF高點2": round(_d2,2),
+                                                    "DIF衰退": f"{_div_strength:.0f}%"})
+
+            # ── I3. 絕對高點背離（圖中最典型：498創新高但DIF遠低於歷史峰值）──
+            # 適用於跨週期頂背離：用全局DIF峰值比較，不依賴局部高點匹配
+            if len(close) >= 30:
+                _dif_all_max = float(_dif_i.iloc[:-5].max())   # 歷史DIF峰值（排除最近5根）
+                _dif_cur     = float(_dif_i.iloc[-1])
+                _price_cur   = float(close.iloc[-1])
+                _price_max_n = float(close.iloc[-_n:].max())   # 近N根價格最高
+                _dif_at_peak_bar = int(_dif_i.iloc[:-5].values.argmax())  # DIF峰值所在的bar
+                _price_at_dif_peak = float(close.iloc[_dif_at_peak_bar])  # DIF峰值時的價格
+
+                # 條件：當前價格接近歷史最高，但DIF遠低於歷史峰值
+                _price_near_high  = _price_cur >= _price_max_n * 0.85    # 在最高點85%以內（放寬）
+                _dif_far_below    = _dif_cur < _dif_all_max * 0.60       # DIF不足峰值60%
+                _dif_declining    = _dif_cur < float(_dif_i.iloc[-5])    # DIF仍在下降
+                _dif_was_positive = _dif_all_max > 1.0                   # 確認有過明顯升浪
+
+                if (_price_near_high and _dif_far_below
+                        and _dif_declining and _dif_was_positive):
+                    _decay_pct = (1 - _dif_cur / _dif_all_max) * 100
+                    ck = f"{symbol}|{period_label}|MACD絕對頂背離|{df.index[-1].strftime('%Y%m%d') if hasattr(df.index[-1],'strftime') else str(df.index[-1])[:10]}"
+                    if ck not in st.session_state.sent_alerts:
+                        st.session_state.sent_alerts.add(ck)
+                        if _decay_pct > 70:
+                            _i3_grade = "🚨 極端頂背離"
+                        elif _decay_pct > 50:
+                            _i3_grade = "⚠️ 嚴重頂背離"
+                        else:
+                            _i3_grade = "📉 頂背離"
+                        add_alert(symbol, period_label,
+                                  f"{_i3_grade}｜價格在高位({_price_cur:.2f}，近高{_price_max_n:.2f}的{_price_cur/_price_max_n*100:.0f}%)"
+                                  f" 但DIF僅剩歷史峰值的{100-_decay_pct:.0f}%"
+                                  f"（峰值DIF={_dif_all_max:.2f}→當前={_dif_cur:.2f}，衰退{_decay_pct:.0f}%）"
+                                  f"，多頭動能嚴重透支，大頂風險極高！", "bear")
+                        new_signals.append(f"絕對頂背離DIF僅剩{100-_decay_pct:.0f}%")
 
     except Exception:
         pass
@@ -3769,11 +4729,413 @@ def run_alerts(symbol, period_label, df, trigger_ai=False, mkt=None):
                               f"，市場進入恐慌模式，所有多單注意風控！", "bear")
                     new_signals.append(f"VIX極端恐慌{_vix_spot:.0f}")
 
+            # ── L5. VIX 絕對水平警戒區（無論漲跌，水平本身就有意義）─────────
+            # 圖中 VIX=25.66 已進入高恐慌區（>25），TSLA 對應跌到 399 區
+            _vix_zone_ck = f"{symbol}|{period_label}|VIX水平警戒|{df.index[-1].strftime('%Y%m%d') if hasattr(df.index[-1],'strftime') else str(df.index[-1])[:10]}"
+            if _vix_zone_ck not in st.session_state.sent_alerts:
+                if _vix_spot >= 30:
+                    st.session_state.sent_alerts.add(_vix_zone_ck)
+                    add_alert(symbol, period_label,
+                              f"🚨 【VIX極度恐慌區】VIX={_vix_spot:.1f} ≥30"
+                              f"，歷史上此水平對應市場重大下跌，極端謹慎！", "bear")
+                    new_signals.append(f"VIX極度恐慌≥30")
+                elif _vix_spot >= 25:
+                    st.session_state.sent_alerts.add(_vix_zone_ck)
+                    add_alert(symbol, period_label,
+                              f"⚠️ 【VIX高恐慌區】VIX={_vix_spot:.1f} 介於25-30"
+                              f"，市場恐慌情緒明顯，股票下行壓力大，謹慎持多！", "bear")
+                    new_signals.append(f"VIX高恐慌25-30")
+                elif _vix_spot <= 13:
+                    st.session_state.sent_alerts.add(_vix_zone_ck)
+                    add_alert(symbol, period_label,
+                              f"📈 【VIX極低恐慌區】VIX={_vix_spot:.1f} ≤13"
+                              f"，市場極度樂觀，適合持多，但需防黑天鵝！", "bull")
+                    new_signals.append(f"VIX極低樂觀≤13")
+
+            # ── L6. VIX 盤中急升偵測（當日漲幅，圖中3/6當天+28%場景）─────────
+            # chg_pct_from_prev 是相對前日收盤的變化
+            _vix_intraday_surge = abs(_vix_pct) > 15  # 當日漲跌超15%
+            if _vix_intraday_surge:
+                _surge_ck = f"{symbol}|{period_label}|VIX盤中急升|{_ts}"
+                if _surge_ck not in st.session_state.sent_alerts:
+                    st.session_state.sent_alerts.add(_surge_ck)
+                    if _vix_pct > 15:   # 急升→股市恐慌
+                        add_alert(symbol, period_label,
+                                  f"🚨 【VIX盤中暴升{_vix_pct:+.0f}%】VIX={_vix_spot:.1f}"
+                                  f"，單日恐慌指數暴增，可能對應股市急跌！"
+                                  f"（參考：股價近期低位{_lp_low20:.2f}）", "bear")
+                        new_signals.append(f"VIX盤中暴升{_vix_pct:.0f}%")
+                    else:               # 急跌→恐慌消退
+                        add_alert(symbol, period_label,
+                                  f"🚀 【VIX盤中暴跌{_vix_pct:.0f}%】VIX={_vix_spot:.1f}"
+                                  f"，恐慌指數單日大幅消退，股市反彈機率大！", "bull")
+                        new_signals.append(f"VIX盤中暴跌{_vix_pct:.0f}%")
+
+            # ── L7. VIX 多日趨勢偵測（日K視角：圖中從15→23.76持續上升）────────
+            try:
+                _vix_hist = fetch_vix_history()
+                if len(_vix_hist) >= 10:
+                    _vh = _vix_hist.values
+                    _vh_now  = float(_vh[-1])
+                    _vh_5d   = float(_vh[-5])    # 5日前
+                    _vh_10d  = float(_vh[-10])   # 10日前
+                    _vh_low  = float(min(_vh[-20:]))  # 近20日最低
+                    _vh_high = float(max(_vh[-20:]))  # 近20日最高
+
+                    # 多日累計升幅
+                    _vix_5d_chg  = (_vh_now - _vh_5d)  / _vh_5d  * 100
+                    _vix_10d_chg = (_vh_now - _vh_10d) / _vh_10d * 100
+
+                    # 位置：在近20日區間的百分位
+                    _vix_pos = (_vh_now - _vh_low) / (_vh_high - _vh_low) * 100 if _vh_high > _vh_low else 50
+
+                    _ts_day = df.index[-1].strftime('%Y%m%d') if hasattr(df.index[-1], 'strftime') else str(df.index[-1])[:10]
+
+                    # VIX 多日持續上升（系統性風險積累）
+                    if _vix_5d_chg > 15 and _vix_10d_chg > 20:
+                        _ck7 = f"{symbol}|{period_label}|VIX多日上升趨勢|{_ts_day}"
+                        if _ck7 not in st.session_state.sent_alerts:
+                            st.session_state.sent_alerts.add(_ck7)
+                            if _vix_10d_chg > 40:
+                                _v7g = "🚨 系統性風險警報"
+                            elif _vix_10d_chg > 25:
+                                _v7g = "⚠️ 風險持續累積"
+                            else:
+                                _v7g = "📊 恐慌升溫"
+                            add_alert(symbol, period_label,
+                                      f"{_v7g}｜VIX 5日+{_vix_5d_chg:.0f}%、10日+{_vix_10d_chg:.0f}%"
+                                      f"（{_vh_10d:.1f}→{_vh_now:.1f}）"
+                                      f"，恐慌情緒持續累積，非短期波動！"
+                                      f"（VIX在近20日{_vix_pos:.0f}%分位）", "bear")
+                            new_signals.append(f"VIX多日升{_vix_10d_chg:.0f}%")
+
+                    # VIX 多日持續下降（系統性風險消退，利多）
+                    elif _vix_5d_chg < -15 and _vix_10d_chg < -20:
+                        _ck7 = f"{symbol}|{period_label}|VIX多日下降趨勢|{_ts_day}"
+                        if _ck7 not in st.session_state.sent_alerts:
+                            st.session_state.sent_alerts.add(_ck7)
+                            add_alert(symbol, period_label,
+                                      f"📈 【恐慌持續消退】VIX 5日{_vix_5d_chg:.0f}%、10日{_vix_10d_chg:.0f}%"
+                                      f"（{_vh_10d:.1f}→{_vh_now:.1f}）"
+                                      f"，市場風險持續下降，有利股市上漲！", "bull")
+                            new_signals.append(f"VIX多日降{_vix_10d_chg:.0f}%")
+
+                    # VIX 處於近期高位且未回落（壓頂）
+                    if _vix_pos > 80 and _vh_now > 20:
+                        _ck7b = f"{symbol}|{period_label}|VIX近期高位壓頂|{_ts_day}"
+                        if _ck7b not in st.session_state.sent_alerts:
+                            st.session_state.sent_alerts.add(_ck7b)
+                            add_alert(symbol, period_label,
+                                      f"⚠️ 【VIX近期高位壓頂】VIX={_vh_now:.1f} 處於20日{_vix_pos:.0f}%分位"
+                                      f"（近期低{_vh_low:.1f} 高{_vh_high:.1f}）"
+                                      f"，恐慌未消退，股市反彈空間受限！", "bear")
+                            new_signals.append(f"VIX高位壓頂{_vh_now:.0f}")
+            except Exception:
+                pass
+
     except Exception:
         pass
 
-    # ── 有新信號 → 自動觸發 AI 分析 ──────────────────────────────────────────
-    if not new_signals or not trigger_ai:
+    # ══════════════════════════════════════════════════════════════════════════
+    # M. ADX 趨勢強度 + Williams %R 超買超賣偵測
+    # ══════════════════════════════════════════════════════════════════════════
+    try:
+        if len(df) >= 20 and "High" in df.columns and "Low" in df.columns:
+            _adx, _pdi, _ndi = calc_adx(df, 14)
+            _willr = calc_willr(df, 14)
+
+            _adx_v  = float(_adx.iloc[-1])  if not np.isnan(float(_adx.iloc[-1]))  else None
+            _pdi_v  = float(_pdi.iloc[-1])  if not np.isnan(float(_pdi.iloc[-1]))  else None
+            _ndi_v  = float(_ndi.iloc[-1])  if not np.isnan(float(_ndi.iloc[-1]))  else None
+            _wr_v   = float(_willr.iloc[-1]) if not np.isnan(float(_willr.iloc[-1])) else None
+            _wr_p   = float(_willr.iloc[-2]) if len(_willr)>=2 and not np.isnan(float(_willr.iloc[-2])) else _wr_v
+            _adx_p  = float(_adx.iloc[-2])  if len(_adx)>=2  and not np.isnan(float(_adx.iloc[-2]))  else _adx_v
+
+            _ts = df.index[-1].strftime('%Y%m%d%H') if hasattr(df.index[-1], 'strftime') else str(df.index[-1])[:13]
+
+            # ── M1. ADX 空頭趨勢確認（-DI>+DI 且 ADX>25）────────────────────
+            if _adx_v and _pdi_v and _ndi_v:
+                _bear_trend = _ndi_v > _pdi_v and _adx_v > 25
+                _bull_trend = _pdi_v > _ndi_v and _adx_v > 25
+                _adx_rising = _adx_v > _adx_p if _adx_p else False
+
+                if _bear_trend:
+                    ck = f"{symbol}|{period_label}|ADX空頭趨勢|{_ts}"
+                    if ck not in st.session_state.sent_alerts:
+                        st.session_state.sent_alerts.add(ck)
+                        _strength = "強烈" if _adx_v > 35 else "有效" if _adx_v > 25 else "醞釀中"
+                        add_alert(symbol, period_label,
+                                  f"💀 【ADX空頭趨勢{_strength}】ADX={_adx_v:.1f}"
+                                  f"，-DI({_ndi_v:.1f})>+DI({_pdi_v:.1f})空頭主導"
+                                  f"{'，ADX上升趨勢加強中！' if _adx_rising else '，ADX持平趨勢穩定。'}", "bear")
+                        new_signals.append(f"ADX空頭{_adx_v:.0f}-DI>{_pdi_v:.0f}")
+
+                elif _bull_trend:
+                    ck = f"{symbol}|{period_label}|ADX多頭趨勢|{_ts}"
+                    if ck not in st.session_state.sent_alerts:
+                        st.session_state.sent_alerts.add(ck)
+                        _strength = "強烈" if _adx_v > 35 else "有效"
+                        add_alert(symbol, period_label,
+                                  f"🚀 【ADX多頭趨勢{_strength}】ADX={_adx_v:.1f}"
+                                  f"，+DI({_pdi_v:.1f})>-DI({_ndi_v:.1f})多頭主導"
+                                  f"{'，ADX上升趨勢加強！' if _adx_rising else '。'}", "bull")
+                        new_signals.append(f"ADX多頭{_adx_v:.0f}+DI>{_ndi_v:.0f}")
+
+                # ── M2. DI 交叉（方向轉換最早期訊號）────────────────────────
+                _pdi_p = float(_pdi.iloc[-2]) if len(_pdi)>=2 else _pdi_v
+                _ndi_p = float(_ndi.iloc[-2]) if len(_ndi)>=2 else _ndi_v
+                _bull_cross = _pdi_v > _ndi_v and _pdi_p <= _ndi_p   # +DI上穿-DI
+                _bear_cross = _ndi_v > _pdi_v and _ndi_p <= _pdi_p   # -DI上穿+DI
+
+                if _bull_cross:
+                    ck = f"{symbol}|{period_label}|DI多頭交叉|{_ts}"
+                    if ck not in st.session_state.sent_alerts:
+                        st.session_state.sent_alerts.add(ck)
+                        add_alert(symbol, period_label,
+                                  f"📈 【DI多頭交叉】+DI({_pdi_v:.1f}) 上穿 -DI({_ndi_v:.1f})"
+                                  f"，方向由空轉多，趨勢反轉訊號！ADX={_adx_v:.1f}", "bull")
+                        new_signals.append(f"DI多頭交叉")
+
+                elif _bear_cross:
+                    ck = f"{symbol}|{period_label}|DI空頭交叉|{_ts}"
+                    if ck not in st.session_state.sent_alerts:
+                        st.session_state.sent_alerts.add(ck)
+                        add_alert(symbol, period_label,
+                                  f"📉 【DI空頭交叉】-DI({_ndi_v:.1f}) 上穿 +DI({_pdi_v:.1f})"
+                                  f"，方向由多轉空，趨勢反轉訊號！ADX={_adx_v:.1f}", "bear")
+                        new_signals.append(f"DI空頭交叉")
+
+            # ── M3. Williams %R 超買/超賣偵測 ────────────────────────────────
+            if _wr_v is not None:
+                # 超賣回升穿越-80（底部反彈訊號）
+                if _wr_p is not None and _wr_p < -80 and _wr_v >= -80:
+                    ck = f"{symbol}|{period_label}|WR超賣回升|{_ts}"
+                    if ck not in st.session_state.sent_alerts:
+                        st.session_state.sent_alerts.add(ck)
+                        add_alert(symbol, period_label,
+                                  f"🟢 【Williams %R超賣回升】WR穿越-80({_wr_v:.1f})"
+                                  f"，從超賣區反彈，潛在底部買入機會！", "bull")
+                        new_signals.append(f"WR超賣回升{_wr_v:.0f}")
+
+                # 超買回落穿越-20（頂部回落訊號）
+                elif _wr_p is not None and _wr_p > -20 and _wr_v <= -20:
+                    ck = f"{symbol}|{period_label}|WR超買回落|{_ts}"
+                    if ck not in st.session_state.sent_alerts:
+                        st.session_state.sent_alerts.add(ck)
+                        add_alert(symbol, period_label,
+                                  f"🔴 【Williams %R超買回落】WR穿越-20({_wr_v:.1f})"
+                                  f"，從超買區回落，潛在頂部賣出訊號！", "bear")
+                        new_signals.append(f"WR超買回落{_wr_v:.0f}")
+
+                # 持續在超賣區（-80以下）且開始回升
+                elif _wr_v < -80 and _wr_p is not None and _wr_v > _wr_p:
+                    ck = f"{symbol}|{period_label}|WR深度超賣回升|{_ts}"
+                    if ck not in st.session_state.sent_alerts:
+                        st.session_state.sent_alerts.add(ck)
+                        add_alert(symbol, period_label,
+                                  f"💡 【Williams %R深度超賣】WR={_wr_v:.1f}(<-80)"
+                                  f" 且開始回升，極度超賣反彈機率高！", "bull")
+                        new_signals.append(f"WR深度超賣{_wr_v:.0f}")
+
+                # M4. ADX+WR 組合：趨勢有效 + 未到超賣（圖中當前狀態：ADX=25，WR=-47）
+                # 含義：空頭趨勢有效，但WR還在中間，跌勢可能繼續
+                if (_adx_v and _ndi_v and _pdi_v
+                        and _adx_v > 25 and _ndi_v > _pdi_v    # 有效空頭趨勢
+                        and -80 < _wr_v < -20):                  # WR中性（未超賣）
+                    ck = f"{symbol}|{period_label}|ADX空趨勢WR中性|{_ts}"
+                    if ck not in st.session_state.sent_alerts:
+                        st.session_state.sent_alerts.add(ck)
+                        add_alert(symbol, period_label,
+                                  f"⚠️ 【空頭趨勢仍有空間】ADX={_adx_v:.1f}空頭有效"
+                                  f"，WR={_wr_v:.1f} 尚未達超賣區(-80)"
+                                  f"，下跌動能未耗盡，暫不宜抄底！", "bear")
+                        new_signals.append(f"ADX空頭WR中性{_wr_v:.0f}")
+
+    except Exception:
+        pass
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # N. 三大策略形態偵測
+    #    N1. ORB 開盤區間突破（Phase A→B→C→D）
+    #    N2. Consolidation 回測支撐再進場（圖1步驟5）
+    #    N3. Key Level 強度評分（多次反彈+強烈反應）
+    # ══════════════════════════════════════════════════════════════════════════
+    try:
+        _n_price = float(close.iloc[-1])
+        _n_open  = float(df["Open"].iloc[-1])   if "Open"  in df.columns else _n_price
+        _n_high  = float(df["High"].iloc[-1])   if "High"  in df.columns else _n_price
+        _n_low   = float(df["Low"].iloc[-1])    if "Low"   in df.columns else _n_price
+        _n_ts    = df.index[-1].strftime('%Y%m%d%H') if hasattr(df.index[-1],'strftime') else str(df.index[-1])[:13]
+
+        # ── N1. ORB 開盤區間突破（僅限分鐘級時間週期）──────────────────────
+        _is_intraday = any(x in period_label for x in ["1分","5分","15分","30分","1m","5m","15m","30m"])
+        if _is_intraday and len(df) >= 10 and "High" in df.columns:
+            # 取當日前6根5分鐘K（=開盤30分鐘）計算 ORB
+            try:
+                _today_idx = df.index[-1].date() if hasattr(df.index[-1], 'date') else None
+                if _today_idx:
+                    _today_bars = df[df.index.date == _today_idx] if hasattr(df.index, 'date') else df.iloc[-40:]
+                    _orb_bars   = _today_bars.iloc[:6]   # 前6根 = 開盤30分鐘（5m週期）
+                    if len(_orb_bars) >= 3:
+                        _orb_hi = float(_orb_bars["High"].max())
+                        _orb_lo = float(_orb_bars["Low"].min())
+                        _orb_rng = _orb_hi - _orb_lo
+
+                        # Phase B：當前突破 ORB 高點
+                        _orb_breakout_up   = _n_price > _orb_hi * 1.002
+                        _orb_breakout_down = _n_price < _orb_lo * 0.998
+
+                        # Phase C：突破後回測守住（在ORB高點上方0-1.5%）
+                        # 需要：前幾根已突破，當前根回測但收在 ORB 高點附近
+                        _prev_max = float(df["High"].iloc[-6:-1].max()) if len(df) >= 6 else _n_price
+                        _prev_min = float(df["Low"].iloc[-6:-1].min())  if len(df) >= 6 else _n_price
+                        _prev_broke_hi = _prev_max > _orb_hi * 1.003   # 之前已突破
+                        _prev_broke_lo = _prev_min < _orb_lo * 0.997   # 之前已跌破
+
+                        _retest_hi_hold = (_prev_broke_hi and                           # 之前突破過
+                                           _n_low <= _orb_hi * 1.008 and               # 當根回測到 ORB 附近
+                                           _n_price >= _orb_hi * 0.998 and             # 但收盤守住
+                                           _n_price > _n_open)                          # 陽線收
+
+                        _retest_lo_hold = (_prev_broke_lo and
+                                           _n_high >= _orb_lo * 0.992 and
+                                           _n_price <= _orb_lo * 1.002 and
+                                           _n_price < _n_open)
+
+                        if _retest_hi_hold:
+                            ck = f"{symbol}|{period_label}|ORB回測支撐|{_n_ts}"
+                            if ck not in st.session_state.sent_alerts:
+                                st.session_state.sent_alerts.add(ck)
+                                add_alert(symbol, period_label,
+                                          f"🎯 【ORB Phase C 進場信號】突破開盤區間高點{_orb_hi:.2f}"
+                                          f"後回測守住，陽線確認支撐"
+                                          f"，目標看 Phase D 新高！"
+                                          f"（ORB區間{_orb_lo:.2f}-{_orb_hi:.2f}，寬度{_orb_rng:.2f}）"
+                                          f"　止損設於ORB低點{_orb_lo:.2f}以下", "bull")
+                                new_signals.append(f"ORB突破回測買入{_orb_hi:.2f}")
+                                tl_log_decision(symbol, period_label, "N1-ORB",
+                                                triggered=True, signal_type="bull",
+                                                reason=f"Phase C：突破{_orb_hi:.2f}後回測守住，陽線收盤",
+                                                confidence=75,
+                                                key_values={"ORB高": _orb_hi, "ORB低": _orb_lo,
+                                                            "區間寬度": round(_orb_rng,2), "當前": _n_price})
+
+                        elif _retest_lo_hold:
+                            ck = f"{symbol}|{period_label}|ORB跌破回測|{_n_ts}"
+                            if ck not in st.session_state.sent_alerts:
+                                st.session_state.sent_alerts.add(ck)
+                                add_alert(symbol, period_label,
+                                          f"📉 【ORB跌破回測做空】跌破開盤區間低點{_orb_lo:.2f}"
+                                          f"後反彈回測但守不住，陰線確認"
+                                          f"，看空目標！止損設於ORB高點{_orb_hi:.2f}以上", "bear")
+                                new_signals.append(f"ORB跌破回測做空{_orb_lo:.2f}")
+
+            except Exception:
+                pass
+
+        # ── N2. Consolidation 突破後回測支撐進場（圖1步驟5）──────────────────
+        # 邏輯：G7 檢測到盤整突破（多根前），現在回測到突破點附近，守住→進場
+        if len(close) >= 20:
+            _n2_window = 25
+            _n2_c  = close.iloc[-_n2_window:]
+            _n2_hi = float(_n2_c.max())           # 盤整突破後的最高點
+            _n2_range_hi = float(close.iloc[-_n2_window:-8].max())  # 排除最近8根（突破後的上漲段）
+
+            # 當前在突破點附近（距突破頂±0.5%）
+            _n2_near_breakout  = abs(_n_price - _n2_range_hi) / _n2_range_hi < 0.005
+            # 之前有過突破（5根前的最高點 > 更之前的盤整頂）
+            _n2_broke = _n2_hi > _n2_range_hi * 1.008
+            # 當前陽線（守住支撐）
+            _n2_bull_bar = _n_price > _n_open and _n_price >= _n2_range_hi * 0.998
+
+            # 量能縮小（回測時量小是好事）
+            _n2_vol_now  = float(vol.iloc[-1])
+            _n2_vol_prev = float(vol.iloc[-6:-1].mean()) if len(vol) >= 6 else _n2_vol_now
+            _n2_low_vol  = _n2_vol_now < _n2_vol_prev * 0.7  # 回測量縮
+
+            if _n2_broke and _n2_near_breakout and _n2_bull_bar:
+                ck = f"{symbol}|{period_label}|整理突破回測|{_n_ts}"
+                if ck not in st.session_state.sent_alerts:
+                    st.session_state.sent_alerts.add(ck)
+                    vol_note = "（縮量回測更佳✅）" if _n2_low_vol else ""
+                    add_alert(symbol, period_label,
+                              f"🎯 【整理突破回測買點】價格突破盤整頂{_n2_range_hi:.2f}後"
+                              f"回測守住{vol_note}"
+                              f"，陽線確認支撐，圖1策略步驟5進場！"
+                              f"　止損設於{_n2_range_hi * 0.995:.2f}以下", "bull")
+                    new_signals.append(f"整理突破回測{_n2_range_hi:.2f}")
+                    tl_log_decision(symbol, period_label, "N2-Consolidation",
+                                    triggered=True, signal_type="bull",
+                                    reason=f"突破{_n2_range_hi:.2f}後回測守住，{'縮量' if _n2_low_vol else '量正常'}",
+                                    confidence=70 + (10 if _n2_low_vol else 0),
+                                    key_values={"突破頂": _n2_range_hi, "當前": _n_price,
+                                                "距突破頂": f"{(_n_price-_n2_range_hi)/_n2_range_hi*100:+.2f}%",
+                                                "縮量": _n2_low_vol})
+
+        # ── N3. Key Level 強度評分（圖3：多次反彈+強烈反應）──────────────────
+        if len(close) >= 30 and "High" in df.columns:
+            _n3_lookback = min(60, len(close))
+            _n3_c  = close.iloc[-_n3_lookback:]
+            _n3_hi = df["High"].iloc[-_n3_lookback:]
+            _n3_lo = df["Low"].iloc[-_n3_lookback:]
+
+            # 自動找關鍵水平（用近60根的最高頻率價格區間）
+            _n3_vals  = _n3_c.values
+            _n3_all   = np.concatenate([_n3_vals, _n3_hi.values, _n3_lo.values])
+            _n3_p10   = np.percentile(_n3_all, 10)   # 支撐帶低
+            _n3_p90   = np.percentile(_n3_all, 90)   # 阻力帶高
+
+            # 對每個候選水平評分（每次測試的反應幅度）
+            def _key_level_score(level_price, tolerance=0.005):
+                touches = 0; strong_reactions = 0
+                n3_len = len(_n3_vals)
+                for i in range(n3_len):
+                    lo_i = float(_n3_lo.iloc[i]); hi_i = float(_n3_hi.iloc[i])
+                    cl_i = float(_n3_c.iloc[i])
+                    # 觸及此水平（低點或高點在容忍範圍內）
+                    if abs(lo_i - level_price)/level_price < tolerance or \
+                       abs(hi_i - level_price)/level_price < tolerance:
+                        touches += 1
+                        # 強烈反應：觸及後下一根的價格變動超過0.3%（圖3：Strong Reaction）
+                        if i + 1 < n3_len:
+                            next_cl  = float(_n3_c.iloc[i+1])
+                            reaction = abs(next_cl - cl_i) / level_price * 100
+                            if reaction > 0.3: strong_reactions += 1
+                        # 或當根K線本身寬度超過0.6%（長影線強烈反應）
+                        elif (hi_i - lo_i) / level_price * 100 > 0.6:
+                            strong_reactions += 1
+                return touches, strong_reactions
+
+            # 當前價格附近±2%的支撐/阻力評分
+            for _lv_offset in [-0.008, -0.004, 0, 0.004, 0.008]:
+                _lv = _n_price * (1 + _lv_offset)
+                _lv_touches, _lv_strong = _key_level_score(_lv)
+
+                # 圖3標準：≥3次觸及 + ≥2次強烈反應
+                if _lv_touches >= 3 and _lv_strong >= 2:
+                    _lv_type  = "支撐" if _lv < _n_price else "阻力" if _lv > _n_price else "當前關鍵位"
+                    _lv_grade = "🔑🔑 極強" if _lv_touches >= 5 else "🔑 強"
+                    ck = f"{symbol}|{period_label}|關鍵水平{_lv:.2f}|{_n_ts[:10]}"
+                    if ck not in st.session_state.sent_alerts:
+                        st.session_state.sent_alerts.add(ck)
+                        add_alert(symbol, period_label,
+                                  f"{_lv_grade}關鍵{_lv_type}位 {_lv:.2f}"
+                                  f"（{_lv_touches}次測試，{_lv_strong}次強烈反應）"
+                                  f"，符合圖3 Key Level 3項標準！"
+                                  f"　當前距此水平{(_n_price-_lv)/_lv*100:+.2f}%",
+                                  "bull" if _lv < _n_price else "bear")
+                        new_signals.append(f"關鍵{_lv_type}位{_lv:.2f}×{_lv_touches}")
+                        tl_log_decision(symbol, period_label, "N3-KeyLevel",
+                                        triggered=True,
+                                        signal_type="bull" if _lv < _n_price else "bear",
+                                        reason=f"{_lv_type}位{_lv:.2f}：{_lv_touches}次觸及，{_lv_strong}次強烈反應",
+                                        confidence=min(50 + _lv_touches*8 + _lv_strong*5, 90),
+                                        key_values={"水平": round(_lv,2), "觸及次數": _lv_touches,
+                                                    "強烈反應": _lv_strong, "類型": _lv_type})
+                    break  # 只報最強的一個水平
+
+    except Exception:
+        pass
         return
     if not get_groq_key():
         return
@@ -5044,6 +6406,11 @@ if st.session_state.alert_log:
             f'🕐 {e["時間"]}　【{e["股票"]}】{p_tag}　{e["訊息"]}'
             f'</div>',
             unsafe_allow_html=True)
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 交易日誌面板
+# ══════════════════════════════════════════════════════════════════════════════
+render_trading_log()
 
 # ══════════════════════════════════════════════════════════════════════════════
 # 自動刷新

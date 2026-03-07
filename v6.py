@@ -2513,7 +2513,7 @@ def render_trading_log():
               <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;">
                 <div><span style="color:#445577;">平均獲利</span><span style="color:#00ee66;font-weight:700;margin-left:10px;">+{stats['avg_win']:.2f}%</span></div>
                 <div><span style="color:#445577;">平均虧損</span><span style="color:#ff5566;font-weight:700;margin-left:10px;">{stats['avg_loss']:.2f}%</span></div>
-                <div><span style="color:#445577;">盈虧比</span><span style="color:#ffdd44;font-weight:700;margin-left:10px;">{abs(stats['avg_win']/stats['avg_loss']):.2f}:1</span></div>
+                <div><span style="color:#445577;">盈虧比</span><span style="color:#ffdd44;font-weight:700;margin-left:10px;">{f"{abs(stats['avg_win']/stats['avg_loss']):.2f}:1" if stats['avg_loss'] != 0 else '∞'}</span></div>
                 <div><span style="color:#445577;">最大回撤</span><span style="color:#ff8855;font-weight:700;margin-left:10px;">-{dd:.2f}%</span></div>
                 <div><span style="color:#445577;">期望值/筆</span><span style="color:{'#00ee66' if exp>=0 else '#ff5566'};font-weight:700;margin-left:10px;">{exp:+.3f}%</span></div>
                 <div><span style="color:#445577;">獲利因子</span><span style="color:{pf_c};font-weight:700;margin-left:10px;">{pf:.2f}</span></div>

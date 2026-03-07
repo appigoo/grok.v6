@@ -3441,7 +3441,7 @@ def run_alerts(symbol, period_label, df, trigger_ai=False, mkt=None):
         _c3d_deep_dif   = _c3d_dif_cur < -3.0
         _c3d_hist_tiny  = _c3d_hist_range > 0 and abs(_c3d_hist_cur) < _c3d_hist_range * 0.1
         _c3d_near_cross = abs(_c3d_dif_cur - _c3d_dea_cur) < abs(_c3d_dif_cur) * 0.02  # 差距<2%
-        _c3d_dif_rising = float(dif_s.iloc[-1]) > float(dif_s.iloc[-3])  # DIF仍在上升
+        _c3d_dif_rising = float(dif.iloc[-1]) > float(dif.iloc[-3])  # DIF仍在上升
 
         if _c3d_deep_dif and _c3d_hist_tiny and _c3d_near_cross:
             _c3d_ck = f"{symbol}|{period_label}|MACD深谷震盪底|{df.index[-1].strftime('%Y%m%d%H') if hasattr(df.index[-1],'strftime') else str(df.index[-1])[:13]}"

@@ -2097,7 +2097,7 @@ def render_trading_log():
 
     tabs = st.tabs([
         "📋 執行記錄", "🛡 風險管理", "📊 Setup績效",
-        "🧠 心理日誌", "📈 績效統計", "➕ 新增交易"
+        "🧠 心理日誌", "📈 績效統計", "➕ 新增交易", "🤖 AI研究"
     ])
 
     # ══════════════════════════════════════════════════════════════════════════
@@ -2607,6 +2607,515 @@ def render_trading_log():
             st.session_state.trade_id_counter = 1
             st.success("已清除")
             st.rerun()
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # TAB 7: AI 交易研究（自動發現最佳Setup / 市場環境 / 倉位）
+    # ══════════════════════════════════════════════════════════════════════════
+    with tabs[6]:
+        render_ai_research_tab()
+# ══════════════════════════════════════════════════════════════════════════════
+# AI 交易研究系統 - Trading Intelligence Platform
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _build_research_context() -> dict:
+    """從交易日誌萃取結構化數據供 AI 分析"""
+    closed   = [t for t in st.session_state.trade_log if t["status"] == "CLOSED"]
+    psych    = st.session_state.get("psych_log", [])
+    dec_log  = st.session_state.get("decision_log", [])
+    alerts   = st.session_state.get("alert_log", [])
+
+    if not closed:
+        return {}
+
+    from collections import defaultdict
+
+    # ── Setup 統計 ───────────────────────────────────────────────────────────
+    setup_data = defaultdict(lambda: {"trades": [], "pnls": [], "r_mults": []})
+    for t in closed:
+        s   = t.get("setup", "未分類")
+        pnl = t.get("pnl_pct", 0) or 0
+        ep  = t["entry_price"]; sl = t.get("stop_loss")
+        risk = abs(ep - sl) if sl else None
+        r    = pnl / 100 * ep / risk if (risk and risk > 0) else None
+        setup_data[s]["pnls"].append(pnl)
+        if r: setup_data[s]["r_mults"].append(r)
+
+    setup_summary = {}
+    for s, d in setup_data.items():
+        n    = len(d["pnls"])
+        wins = [p for p in d["pnls"] if p > 0]
+        avg_r = sum(d["r_mults"]) / len(d["r_mults"]) if d["r_mults"] else None
+        setup_summary[s] = {
+            "n": n,
+            "win_rate": len(wins) / n * 100,
+            "avg_pnl": sum(d["pnls"]) / n,
+            "total_pnl": sum(d["pnls"]),
+            "avg_r": round(avg_r, 2) if avg_r else None,
+        }
+
+    # ── 情緒 vs 績效 ─────────────────────────────────────────────────────────
+    emotion_data = defaultdict(lambda: {"wins": 0, "total": 0, "pnls": []})
+    for e in psych:
+        em = e.get("emotion", "未知")
+        emotion_data[em]["total"] += 1
+        pnl = e.get("pnl_pct", 0)
+        emotion_data[em]["pnls"].append(pnl)
+        if pnl > 0: emotion_data[em]["wins"] += 1
+
+    emotion_summary = {
+        em: {
+            "win_rate": d["wins"]/d["total"]*100 if d["total"] else 0,
+            "avg_pnl": sum(d["pnls"])/len(d["pnls"]) if d["pnls"] else 0,
+            "n": d["total"],
+        }
+        for em, d in emotion_data.items()
+    }
+
+    # ── 時間段分析（早盤/午盤/尾盤）────────────────────────────────────────
+    time_data = defaultdict(list)
+    for t in closed:
+        try:
+            h = int(t["entry_time"][11:13])
+            if   h < 10:  slot = "早盤(9-10)"
+            elif h < 12:  slot = "上午(10-12)"
+            elif h < 14:  slot = "午盤(12-14)"
+            elif h < 16:  slot = "下午(14-16)"
+            else:          slot = "尾盤(16+)"
+            time_data[slot].append(t.get("pnl_pct", 0) or 0)
+        except Exception:
+            pass
+
+    time_summary = {
+        slot: {"avg_pnl": sum(v)/len(v), "n": len(v), "win_rate": len([x for x in v if x>0])/len(v)*100}
+        for slot, v in time_data.items() if v
+    }
+
+    # ── 倉位大小 vs 績效 ─────────────────────────────────────────────────────
+    size_buckets = {"小倉(<50)": [], "中倉(50-200)": [], "大倉(>200)": []}
+    for t in closed:
+        sz = t.get("size", 0)
+        p  = t.get("pnl_pct", 0) or 0
+        if sz < 50:    size_buckets["小倉(<50)"].append(p)
+        elif sz < 200: size_buckets["中倉(50-200)"].append(p)
+        else:          size_buckets["大倉(>200)"].append(p)
+
+    size_summary = {
+        k: {"avg_pnl": sum(v)/len(v), "n": len(v)}
+        for k, v in size_buckets.items() if v
+    }
+
+    # ── 最近警示信號統計 ─────────────────────────────────────────────────────
+    signal_counts = defaultdict(int)
+    for a in alerts[:100]:
+        for kw in ["G7","E0","I1","I2","D5","D6","N1","N2","N3","O1","K3","C3","M1","M4"]:
+            if kw in a.get("訊息", ""):
+                signal_counts[kw] += 1
+
+    return {
+        "total_trades":    len(closed),
+        "setup_summary":   setup_summary,
+        "emotion_summary": emotion_summary,
+        "time_summary":    time_summary,
+        "size_summary":    size_summary,
+        "signal_counts":   dict(signal_counts),
+        "overall_win_rate": len([t for t in closed if (t.get("pnl_pct",0) or 0)>0]) / len(closed) * 100,
+        "overall_pnl":      sum(t.get("pnl_pct",0) or 0 for t in closed),
+    }
+
+
+def _call_ai_research(question: str, context: dict, mode: str) -> str:
+    """呼叫 Claude API 進行交易研究分析"""
+    import json, requests
+
+    system_prompts = {
+        "setup": """你是一位頂尖量化交易分析師。分析交易者的Setup績效數據，
+用繁體中文給出具體、可操作的建議。格式要求：
+- 直接列出最賺錢Setup的排名
+- 每個Setup說明為何有效/無效
+- 給出具體的改進建議和倉位調整
+- 使用數字和百分比支撐每個結論
+- 語氣要像Bloomberg終端的分析報告：精準、簡潔、有力""",
+
+        "market": """你是一位市場環境分析師，專精於識別最適合特定交易策略的市場條件。
+分析交易日誌數據，用繁體中文輸出：
+- 哪種市場環境（趨勢/震盪/高波動）下績效最佳
+- 偵測器信號與交易結果的相關性
+- 最佳交易時段分析
+- VIX水平與勝率的關係""",
+
+        "position": """你是一位風險管理專家。分析倉位大小、止損設置與交易結果的關係，
+用繁體中文給出：
+- 最優倉位大小區間（基於歷史數據）
+- 止損設置的改進建議（R-multiple優化）
+- Kelly公式最優倉位計算
+- 具體的資金管理規則""",
+    }
+
+    ctx_str = json.dumps(context, ensure_ascii=False, indent=2)
+    user_msg = f"""交易數據摘要：
+{ctx_str}
+
+用戶問題：{question}
+
+請提供深度分析，要求：
+1. 基於數據給出具體結論（不要含糊）
+2. 識別3個最重要的發現
+3. 給出立即可執行的行動建議
+4. 如數據不足，說明需要收集哪些數據"""
+
+    try:
+        resp = requests.post(
+            "https://api.anthropic.com/v1/messages",
+            headers={"Content-Type": "application/json"},
+            json={
+                "model": "claude-sonnet-4-20250514",
+                "max_tokens": 1500,
+                "system": system_prompts.get(mode, system_prompts["setup"]),
+                "messages": [{"role": "user", "content": user_msg}]
+            },
+            timeout=30
+        )
+        data = resp.json()
+        return data["content"][0]["text"] if data.get("content") else "AI 分析失敗"
+    except Exception as e:
+        return f"連線錯誤：{e}"
+
+
+def render_ai_research_tab():
+    """AI 交易研究介面 - Bloomberg Terminal 風格"""
+    # ── 掃描線背景 + 終端機美學 ──────────────────────────────────────────────
+    st.markdown("""
+    <style>
+    @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@300;400;600;700&family=Orbitron:wght@700;900&display=swap');
+    .tip-terminal {
+        background: #000;
+        border: 1px solid #ff9900;
+        border-radius: 4px;
+        padding: 20px;
+        font-family: 'IBM Plex Mono', monospace;
+        position: relative;
+        overflow: hidden;
+    }
+    .tip-terminal::before {
+        content: '';
+        position: absolute;
+        top: 0; left: 0; right: 0; bottom: 0;
+        background: repeating-linear-gradient(
+            0deg,
+            transparent,
+            transparent 2px,
+            rgba(255,153,0,0.015) 2px,
+            rgba(255,153,0,0.015) 4px
+        );
+        pointer-events: none;
+    }
+    .tip-header {
+        font-family: 'Orbitron', monospace;
+        color: #ff9900;
+        font-size: 0.65rem;
+        letter-spacing: 3px;
+        margin-bottom: 12px;
+        border-bottom: 1px solid #ff990044;
+        padding-bottom: 8px;
+    }
+    .tip-rank { color: #ff9900; font-weight: 700; }
+    .tip-pos  { color: #00ff88; }
+    .tip-neg  { color: #ff3333; }
+    .tip-dim  { color: #666; font-size: 0.78rem; }
+    .tip-val  { color: #ffcc44; font-weight: 600; }
+    .tip-ai-output {
+        background: #050505;
+        border: 1px solid #ff990066;
+        border-left: 3px solid #ff9900;
+        border-radius: 3px;
+        padding: 16px 20px;
+        font-family: 'IBM Plex Mono', monospace;
+        font-size: 0.8rem;
+        color: #ccaa77;
+        line-height: 1.8;
+        white-space: pre-wrap;
+        margin-top: 12px;
+    }
+    .tip-btn {
+        background: #0a0a0a;
+        border: 1px solid #ff9900;
+        color: #ff9900;
+        font-family: 'IBM Plex Mono', monospace;
+        font-size: 0.72rem;
+        letter-spacing: 2px;
+        padding: 6px 16px;
+        cursor: pointer;
+        transition: all 0.15s;
+    }
+    .tip-metric {
+        display: inline-block;
+        background: #0a0800;
+        border: 1px solid #ff990033;
+        border-radius: 2px;
+        padding: 8px 14px;
+        margin: 4px;
+        text-align: center;
+        font-family: 'IBM Plex Mono', monospace;
+    }
+    </style>
+    """, unsafe_allow_html=True)
+
+    ctx = _build_research_context()
+
+    if not ctx:
+        st.markdown("""
+        <div class="tip-terminal">
+          <div class="tip-header">◈ TRADING INTELLIGENCE PLATFORM  ◈  NO DATA</div>
+          <div style="color:#ff9900;font-family:'IBM Plex Mono',monospace;font-size:0.82rem;">
+            ▸ 尚無交易記錄可供分析<br>
+            ▸ 請先在「新增交易」Tab 記錄至少 3 筆已平倉交易<br>
+            ▸ 數據越多，AI 分析越精準
+          </div>
+        </div>
+        """, unsafe_allow_html=True)
+        return
+
+    n    = ctx["total_trades"]
+    wr   = ctx["overall_win_rate"]
+    pnl  = ctx["overall_pnl"]
+    wr_c = "#00ff88" if wr >= 55 else "#ffcc44" if wr >= 40 else "#ff3333"
+
+    # ── 終端機頂部狀態列 ─────────────────────────────────────────────────────
+    st.markdown(f"""
+    <div class="tip-terminal">
+      <div class="tip-header">
+        ◈ TRADING INTELLIGENCE PLATFORM v1.0 ◈ LIVE ANALYSIS ◈ {n} TRADES LOADED
+      </div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;">
+        <div class="tip-metric">
+          <div class="tip-dim">TOTAL TRADES</div>
+          <div class="tip-rank" style="font-size:1.4rem;">{n}</div>
+        </div>
+        <div class="tip-metric">
+          <div class="tip-dim">WIN RATE</div>
+          <div style="color:{wr_c};font-size:1.4rem;font-weight:700;">{wr:.1f}%</div>
+        </div>
+        <div class="tip-metric">
+          <div class="tip-dim">TOTAL PnL</div>
+          <div class="{'tip-pos' if pnl>=0 else 'tip-neg'}" style="font-size:1.4rem;font-weight:700;">{pnl:+.1f}%</div>
+        </div>
+        <div class="tip-metric">
+          <div class="tip-dim">SETUPS</div>
+          <div class="tip-val" style="font-size:1.4rem;">{len(ctx['setup_summary'])}</div>
+        </div>
+      </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    st.markdown("<br>", unsafe_allow_html=True)
+
+    # ── 三大研究模組 ─────────────────────────────────────────────────────────
+    col1, col2, col3 = st.columns(3)
+
+    # ══ 模組 1：最賺錢 Setup ══════════════════════════════════════════════════
+    with col1:
+        setup_sm = ctx.get("setup_summary", {})
+        ranked = sorted(setup_sm.items(),
+                        key=lambda x: x[1]["total_pnl"], reverse=True)
+
+        rows_html = ""
+        for i, (s, d) in enumerate(ranked[:6]):
+            medal = ["①","②","③","④","⑤","⑥"][i]
+            wr_s  = d["win_rate"]
+            ap    = d["avg_pnl"]
+            col_s = "#00ff88" if ap > 0 else "#ff3333"
+            r_str = f"{d['avg_r']:+.1f}R" if d.get("avg_r") else "—"
+            rows_html += f"""
+            <div style="border-bottom:1px solid #ff990022;padding:6px 0;display:flex;justify-content:space-between;align-items:center;">
+              <div>
+                <span class="tip-rank">{medal}</span>
+                <span style="color:#ddbb88;font-size:0.78rem;margin-left:6px;">{s[:18]}</span>
+              </div>
+              <div style="text-align:right;">
+                <span style="color:{col_s};font-weight:700;font-size:0.82rem;">{ap:+.1f}%</span>
+                <span class="tip-dim" style="margin-left:6px;">{wr_s:.0f}%WR {r_str}</span>
+              </div>
+            </div>"""
+
+        st.markdown(f"""
+        <div class="tip-terminal" style="min-height:280px;">
+          <div class="tip-header">◈ MODULE 01 ◈ SETUP RANKING</div>
+          <div style="font-family:'IBM Plex Mono',monospace;font-size:0.75rem;">
+            {rows_html if rows_html else '<span class="tip-dim">數據不足</span>'}
+          </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+        if st.button("🤖 AI 分析最佳 Setup", key="ai_setup", use_container_width=True):
+            with st.spinner("⚡ 分析中..."):
+                result = _call_ai_research("找出最賺錢的Setup和原因，並給出具體改進建議", ctx, "setup")
+                st.session_state["ai_setup_result"] = result
+        if st.session_state.get("ai_setup_result"):
+            st.markdown(f'<div class="tip-ai-output">{st.session_state["ai_setup_result"]}</div>',
+                        unsafe_allow_html=True)
+
+    # ══ 模組 2：最適市場環境 ══════════════════════════════════════════════════
+    with col2:
+        time_sm = ctx.get("time_summary", {})
+        emo_sm  = ctx.get("emotion_summary", {})
+
+        time_rows = ""
+        for slot, d in sorted(time_sm.items(), key=lambda x: x[1]["avg_pnl"], reverse=True):
+            c = "#00ff88" if d["avg_pnl"] > 0 else "#ff3333"
+            time_rows += f"""
+            <div style="border-bottom:1px solid #ff990022;padding:5px 0;display:flex;justify-content:space-between;">
+              <span style="color:#ddbb88;font-size:0.78rem;">{slot}</span>
+              <span style="color:{c};font-weight:700;">{d['avg_pnl']:+.1f}%</span>
+              <span class="tip-dim">{d['win_rate']:.0f}%WR ×{d['n']}</span>
+            </div>"""
+
+        emo_rows = ""
+        best_emo  = max(emo_sm.items(), key=lambda x: x[1]["win_rate"]) if emo_sm else None
+        worst_emo = min(emo_sm.items(), key=lambda x: x[1]["win_rate"]) if emo_sm else None
+        for em, d in sorted(emo_sm.items(), key=lambda x: -x[1]["win_rate"])[:4]:
+            c = "#00ff88" if d["win_rate"] >= 55 else "#ffcc44" if d["win_rate"] >= 40 else "#ff3333"
+            warn = " ⚠" if d["win_rate"] < 40 and d["n"] >= 2 else ""
+            emo_rows += f"""
+            <div style="border-bottom:1px solid #ff990022;padding:4px 0;display:flex;justify-content:space-between;">
+              <span style="color:#ddbb88;font-size:0.78rem;">{em}{warn}</span>
+              <span style="color:{c};font-weight:700;">{d['win_rate']:.0f}%WR</span>
+              <span class="tip-dim">{d['avg_pnl']:+.1f}% ×{d['n']}</span>
+            </div>"""
+
+        st.markdown(f"""
+        <div class="tip-terminal" style="min-height:280px;">
+          <div class="tip-header">◈ MODULE 02 ◈ MARKET ENV</div>
+          <div style="color:#ff990088;font-size:0.65rem;margin-bottom:4px;font-family:'IBM Plex Mono',monospace;">TIME SLOT PERFORMANCE</div>
+          <div style="font-family:'IBM Plex Mono',monospace;font-size:0.75rem;margin-bottom:10px;">
+            {time_rows if time_rows else '<span class="tip-dim">需要時間數據</span>'}
+          </div>
+          <div style="color:#ff990088;font-size:0.65rem;margin-bottom:4px;font-family:'IBM Plex Mono',monospace;">EMOTION STATE ANALYSIS</div>
+          <div style="font-family:'IBM Plex Mono',monospace;font-size:0.75rem;">
+            {emo_rows if emo_rows else '<span class="tip-dim">需要情緒記錄</span>'}
+          </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+        if st.button("🤖 AI 分析最佳市場環境", key="ai_market", use_container_width=True):
+            with st.spinner("⚡ 分析中..."):
+                result = _call_ai_research("分析最適合的市場環境和交易時段，情緒管理建議", ctx, "market")
+                st.session_state["ai_market_result"] = result
+        if st.session_state.get("ai_market_result"):
+            st.markdown(f'<div class="tip-ai-output">{st.session_state["ai_market_result"]}</div>',
+                        unsafe_allow_html=True)
+
+    # ══ 模組 3：最佳倉位 ══════════════════════════════════════════════════════
+    with col3:
+        size_sm = ctx.get("size_summary", {})
+        acct    = st.session_state.get("_acct_size", 100000)
+        risk_p  = st.session_state.get("_risk_pct", 1.0)
+
+        # Kelly 公式計算
+        closed_all = [t for t in st.session_state.trade_log if t["status"] == "CLOSED"]
+        pnls_all   = [t.get("pnl_pct", 0) or 0 for t in closed_all]
+        wins_all   = [p for p in pnls_all if p > 0]
+        loss_all   = [p for p in pnls_all if p <= 0]
+        kelly_str  = "—"
+        if wins_all and loss_all:
+            w_prob = len(wins_all) / len(pnls_all)
+            avg_w  = sum(wins_all) / len(wins_all) / 100
+            avg_l  = abs(sum(loss_all) / len(loss_all)) / 100
+            b      = avg_w / avg_l if avg_l > 0 else 1
+            kelly  = w_prob - (1 - w_prob) / b
+            kelly_str = f"{kelly*100:.1f}%"
+            half_kelly = kelly * 0.5
+            rec_size = int(acct * half_kelly / 0.02) if half_kelly > 0 else 0
+
+        size_rows = ""
+        for k, d in sorted(size_sm.items(), key=lambda x: x[1]["avg_pnl"], reverse=True):
+            c = "#00ff88" if d["avg_pnl"] > 0 else "#ff3333"
+            size_rows += f"""
+            <div style="border-bottom:1px solid #ff990022;padding:5px 0;display:flex;justify-content:space-between;">
+              <span style="color:#ddbb88;font-size:0.78rem;">{k}</span>
+              <span style="color:{c};font-weight:700;">{d['avg_pnl']:+.1f}%</span>
+              <span class="tip-dim">×{d['n']}筆</span>
+            </div>"""
+
+        st.markdown(f"""
+        <div class="tip-terminal" style="min-height:280px;">
+          <div class="tip-header">◈ MODULE 03 ◈ POSITION SIZING</div>
+          <div style="color:#ff990088;font-size:0.65rem;margin-bottom:4px;font-family:'IBM Plex Mono',monospace;">SIZE vs PERFORMANCE</div>
+          <div style="font-family:'IBM Plex Mono',monospace;font-size:0.75rem;margin-bottom:10px;">
+            {size_rows if size_rows else '<span class="tip-dim">需要倉位數據</span>'}
+          </div>
+          <div style="color:#ff990088;font-size:0.65rem;margin-bottom:6px;font-family:'IBM Plex Mono',monospace;">KELLY CRITERION</div>
+          <div style="font-family:'IBM Plex Mono',monospace;">
+            <div style="display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px solid #ff990022;">
+              <span class="tip-dim">Full Kelly</span>
+              <span class="tip-val">{kelly_str}</span>
+            </div>
+            <div style="display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px solid #ff990022;">
+              <span class="tip-dim">Half Kelly (建議)</span>
+              <span class="tip-pos">{f'{half_kelly*100:.1f}%' if wins_all and loss_all else '—'}</span>
+            </div>
+            <div style="display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px solid #ff990022;">
+              <span class="tip-dim">當前風險設置</span>
+              <span class="tip-val">{risk_p}%</span>
+            </div>
+            <div style="display:flex;justify-content:space-between;padding:4px 0;">
+              <span class="tip-dim">建議單筆風險$</span>
+              <span class="tip-pos">${acct*risk_p/100:,.0f}</span>
+            </div>
+          </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+        if st.button("🤖 AI 優化倉位策略", key="ai_position", use_container_width=True):
+            with st.spinner("⚡ 分析中..."):
+                result = _call_ai_research(
+                    f"基於Kelly公式={kelly_str}，分析最優倉位大小和止損設置，給出具體資金管理規則",
+                    ctx, "position")
+                st.session_state["ai_position_result"] = result
+        if st.session_state.get("ai_position_result"):
+            st.markdown(f'<div class="tip-ai-output">{st.session_state["ai_position_result"]}</div>',
+                        unsafe_allow_html=True)
+
+    # ── 綜合 AI 深度報告 ─────────────────────────────────────────────────────
+    st.markdown("<br>", unsafe_allow_html=True)
+    st.markdown("""
+    <div style="font-family:'IBM Plex Mono',monospace;color:#ff990066;
+                font-size:0.65rem;letter-spacing:3px;text-align:center;margin:8px 0;">
+      ━━━━━━━━━━━━━━━━━━━━━━ DEEP ANALYSIS ━━━━━━━━━━━━━━━━━━━━━━
+    </div>
+    """, unsafe_allow_html=True)
+
+    qcol1, qcol2 = st.columns([3, 1])
+    with qcol1:
+        custom_q = st.text_input("", placeholder="自定義研究問題（例：為何週五的交易勝率特別低？）",
+                                 key="ai_custom_q",
+                                 label_visibility="collapsed")
+    with qcol2:
+        ai_mode = st.selectbox("", ["setup","market","position"],
+                               key="ai_mode_sel", label_visibility="collapsed")
+
+    if st.button("◈ 執行深度分析", key="ai_deep", type="primary", use_container_width=True):
+        q = custom_q or "綜合分析我的交易系統，找出最重要的3個改進點"
+        with st.spinner("⚡ AI 正在深度分析您的交易數據..."):
+            result = _call_ai_research(q, ctx, ai_mode)
+            st.session_state["ai_deep_result"] = result
+
+    if st.session_state.get("ai_deep_result"):
+        st.markdown(f"""
+        <div class="tip-terminal">
+          <div class="tip-header">◈ DEEP ANALYSIS REPORT ◈ {datetime.now().strftime('%Y-%m-%d %H:%M')}</div>
+          <div class="tip-ai-output" style="margin:0;border:none;border-left:2px solid #ff9900;">
+{st.session_state["ai_deep_result"]}
+          </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+        # 清除按鈕
+        if st.button("清除報告", key="clear_ai"):
+            for k in ["ai_setup_result","ai_market_result","ai_position_result","ai_deep_result"]:
+                st.session_state.pop(k, None)
+            st.rerun()
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 @st.cache_data(ttl=60)
 # ══════════════════════════════════════════════════════════════════════════════

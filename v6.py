@@ -5136,8 +5136,198 @@ def run_alerts(symbol, period_label, df, trigger_ai=False, mkt=None):
 
     except Exception:
         pass
-        return
-    if not get_groq_key():
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # O. 多時間框架趨勢共振 + 下跌目標位預測
+    #    O1. MTF 多框架趨勢共振（日K+週K+月K同向 → 超強信號）
+    #    O2. 歷史回撤中位數預測目標支撐位
+    #    O3. 週K/月K 大週期空頭底背離預警（反轉準備信號）
+    # ══════════════════════════════════════════════════════════════════════════
+    try:
+        import yfinance as _yf_o
+        _o_price  = float(close.iloc[-1])
+        _o_ts_day = df.index[-1].strftime('%Y%m%d') if hasattr(df.index[-1],'strftime') else str(df.index[-1])[:10]
+
+        # ── O1. MTF 多時間框架趨勢共振 ────────────────────────────────────────
+        # 拉取日K、週K、月K，判斷各自 EMA5/20 的多空方向
+        @st.cache_data(ttl=300)
+        def _fetch_mtf_trend(sym):
+            result = {}
+            for iv, rng, label in [("1d","3mo","日K"), ("1wk","1y","週K"), ("1mo","5y","月K")]:
+                try:
+                    _df = _yf_o.download(sym, period=rng, interval=iv,
+                                         auto_adjust=True, progress=False)
+                    if _df.empty or len(_df) < 10: continue
+                    _df.columns = [c[0] if isinstance(c,tuple) else c for c in _df.columns]
+                    _c = _df["Close"].dropna()
+                    _e5  = float(_c.ewm(span=5,  adjust=False).mean().iloc[-1])
+                    _e20 = float(_c.ewm(span=20, adjust=False).mean().iloc[-1])
+                    _e60 = float(_c.ewm(span=60, adjust=False).mean().iloc[-1]) if len(_c)>=60 else None
+                    _price_last = float(_c.iloc[-1])
+                    # 趨勢：bull=EMA5>EMA20，bear=EMA5<EMA20
+                    direction = "bull" if _e5 > _e20 else "bear"
+                    # 相對EMA60位置（加分項）
+                    above_e60 = (_e5 > _e60) if _e60 else None
+                    result[label] = {
+                        "direction": direction,
+                        "e5": _e5, "e20": _e20,
+                        "price": _price_last,
+                        "above_e60": above_e60,
+                        "pct_from_e20": (_price_last - _e20) / _e20 * 100,
+                    }
+                except Exception:
+                    pass
+            return result
+
+        _mtf = _fetch_mtf_trend(symbol)
+
+        if len(_mtf) >= 2:
+            _bull_count = sum(1 for v in _mtf.values() if v["direction"] == "bull")
+            _bear_count = sum(1 for v in _mtf.values() if v["direction"] == "bear")
+            _frames_bear = [k for k,v in _mtf.items() if v["direction"] == "bear"]
+            _frames_bull = [k for k,v in _mtf.items() if v["direction"] == "bull"]
+
+            # 多框架全空頭共振（圖中週K空頭場景）
+            if _bear_count >= 2:
+                _o1_ck = f"{symbol}|{period_label}|MTF空頭共振|{_o_ts_day}"
+                if _o1_ck not in st.session_state.sent_alerts:
+                    st.session_state.sent_alerts.add(_o1_ck)
+                    _frame_detail = "　".join([
+                        f"{k}({'空' if v['direction']=='bear' else '多'}·距EMA20={v['pct_from_e20']:+.1f}%)"
+                        for k,v in _mtf.items()
+                    ])
+                    if _bear_count == 3:
+                        _o1_grade = "🚨 三框架全空頭"
+                        _o1_conf  = 90
+                    else:
+                        _o1_grade = "⚠️ 雙框架空頭共振"
+                        _o1_conf  = 72
+                    add_alert(symbol, period_label,
+                              f"{_o1_grade}｜{'+'.join(_frames_bear)}同時看空"
+                              f"（{_frame_detail}）"
+                              f"，多時間框架趨勢一致，下行動能最強！", "bear")
+                    new_signals.append(f"MTF{_bear_count}框架空頭共振")
+                    tl_log_decision(symbol, period_label, "O1-MTF",
+                                    triggered=True, signal_type="bear",
+                                    reason=f"{'+'.join(_frames_bear)}框架EMA5<EMA20空頭共振",
+                                    confidence=_o1_conf,
+                                    key_values={k: v["direction"] for k,v in _mtf.items()})
+
+            # 多框架全多頭共振
+            elif _bull_count >= 2:
+                _o1b_ck = f"{symbol}|{period_label}|MTF多頭共振|{_o_ts_day}"
+                if _o1b_ck not in st.session_state.sent_alerts:
+                    st.session_state.sent_alerts.add(_o1b_ck)
+                    _o1b_grade = "🚀🚀 三框架全多頭" if _bull_count == 3 else "🚀 雙框架多頭共振"
+                    add_alert(symbol, period_label,
+                              f"{_o1b_grade}｜{'+'.join(_frames_bull)}同時看多"
+                              f"，多時間框架趨勢共振，上行動能最強！", "bull")
+                    new_signals.append(f"MTF{_bull_count}框架多頭共振")
+
+        # ── O2. 歷史回撤分析 + 下跌目標位預測 ──────────────────────────────────
+        # 從近期高點計算合理的回撤目標（基於歷史回撤中位數）
+        if len(close) >= 30 and "High" in df.columns:
+            _o2_high = float(df["High"].iloc[-60:].max()) if len(df)>=60 else float(df["High"].max())
+            _o2_cur  = _o_price
+            _o2_from_top = (_o2_cur - _o2_high) / _o2_high * 100  # 已跌幅度
+
+            # 只在已從高點回落5%以上時計算目標
+            if _o2_from_top < -5:
+                # 用 ATR 估算波動率
+                if "Low" in df.columns:
+                    _atr_n = min(14, len(df)-1)
+                    _hi_s  = df["High"].iloc[-_atr_n:]
+                    _lo_s  = df["Low"].iloc[-_atr_n:]
+                    _cl_s  = close.iloc[-_atr_n-1:-1]
+                    _tr    = [max(float(_hi_s.iloc[i])-float(_lo_s.iloc[i]),
+                                  abs(float(_hi_s.iloc[i])-float(_cl_s.iloc[i])),
+                                  abs(float(_lo_s.iloc[i])-float(_cl_s.iloc[i])))
+                              for i in range(min(_atr_n, len(_hi_s), len(_lo_s), len(_cl_s)))]
+                    _atr   = sum(_tr) / len(_tr) if _tr else _o2_cur * 0.01
+
+                    # 目標位：黃金回撤（38.2%/50%/61.8%）從高點計算
+                    _fib_targets = {
+                        "38.2%回撤": _o2_high * (1 - 0.382 * abs(_o2_from_top/100) * (100/abs(_o2_from_top))),
+                        "50%回撤":   _o2_high * 0.50 if _o2_from_top < -30 else _o2_cur - _atr * 3,
+                        "ATR×3目標": _o2_cur - _atr * 3,
+                    }
+
+                    # 使用 EMA200 作為最強支撐目標
+                    if len(close) >= 200:
+                        _e200_target = float(calc_ema(close, 200).iloc[-1])
+                        _fib_targets["EMA200支撐"] = _e200_target
+
+                    _o2_ck = f"{symbol}|{period_label}|回撤目標分析|{_o_ts_day}"
+                    if _o2_ck not in st.session_state.sent_alerts:
+                        st.session_state.sent_alerts.add(_o2_ck)
+                        _tgt_str = "　".join([
+                            f"{k}={v:.2f}（距今{(v-_o2_cur)/_o2_cur*100:+.1f}%）"
+                            for k,v in _fib_targets.items()
+                            if v < _o2_cur  # 只顯示在當前價格以下的目標
+                        ])
+                        if _tgt_str:
+                            add_alert(symbol, period_label,
+                                      f"📐 【回撤目標位分析】已從高點{_o2_high:.2f}下跌{_o2_from_top:.1f}%"
+                                      f"，技術目標支撐：{_tgt_str}"
+                                      f"　（ATR={_atr:.2f}，波動基準）", "bear")
+                            new_signals.append(f"回撤目標高點{_o2_high:.0f}已跌{_o2_from_top:.0f}%")
+
+        # ── O3. 週K/月K 大週期底背離預警（空頭末期反轉準備信號）─────────────
+        # 當日K已出現底背離（I1觸發），且週K RSI偏低 → 大週期反轉前兆
+        @st.cache_data(ttl=600)
+        def _fetch_weekly_rsi(sym):
+            try:
+                _df = _yf_o.download(sym, period="2y", interval="1wk",
+                                     auto_adjust=True, progress=False)
+                if _df.empty or len(_df) < 20: return None, None
+                _df.columns = [c[0] if isinstance(c,tuple) else c for c in _df.columns]
+                _c = _df["Close"].dropna()
+                delta = _c.diff()
+                gain  = delta.clip(lower=0).ewm(alpha=1/14, adjust=False).mean()
+                loss  = (-delta.clip(upper=0)).ewm(alpha=1/14, adjust=False).mean()
+                rs    = gain / loss
+                rsi   = 100 - 100/(1+rs)
+                return float(rsi.iloc[-1]), float(rsi.iloc[-2])
+            except Exception:
+                return None, None
+
+        _w_rsi, _w_rsi_prev = _fetch_weekly_rsi(symbol)
+
+        if _w_rsi is not None:
+            _o3_ck = f"{symbol}|{period_label}|週K底背離預警|{_o_ts_day}"
+            # 週K RSI<40 且日K已有底背離信號（新信號列表中）
+            _has_daily_diverg = any("底背離" in s or "MACD深谷" in s for s in new_signals)
+            if _w_rsi < 40 and _o3_ck not in st.session_state.sent_alerts:
+                st.session_state.sent_alerts.add(_o3_ck)
+                _rsi_trend = "↑回升" if _w_rsi > _w_rsi_prev else "↓仍下行"
+                if _w_rsi < 30:
+                    _o3_grade = "🔔 週K超賣區"
+                    _o3_note  = "歷史上週K RSI<30 往往是大週期底部！"
+                elif _w_rsi < 35:
+                    _o3_grade = "📊 週K深度偏空"
+                    _o3_note  = "接近週K超賣，留意底部信號"
+                else:
+                    _o3_grade = "📊 週K偏空"
+                    _o3_note  = "週K趨勢仍偏空"
+
+                add_alert(symbol, period_label,
+                          f"{_o3_grade}｜週K RSI={_w_rsi:.1f}{_rsi_trend}"
+                          f"，{_o3_note}"
+                          f"{'　⚡日K已出現底背離，多框架共振底部！' if _has_daily_diverg else ''}"
+                          f"　（配合日K信號確認後再布局，勿搶底）",
+                          "bull" if _has_daily_diverg and _w_rsi < 35 else "info")
+                new_signals.append(f"週KRSI{_w_rsi:.0f}{'底部共振' if _has_daily_diverg else '偏空'}")
+                tl_log_decision(symbol, period_label, "O3-WeeklyRSI",
+                                triggered=True,
+                                signal_type="bull" if _has_daily_diverg and _w_rsi < 35 else "info",
+                                reason=f"週K RSI={_w_rsi:.1f}({'超賣' if _w_rsi<30 else '偏空'})"
+                                       f"{'，日K底背離共振' if _has_daily_diverg else ''}",
+                                confidence=55 + (20 if _has_daily_diverg else 0) + (15 if _w_rsi<30 else 0),
+                                key_values={"週K RSI": round(_w_rsi,1), "前週RSI": round(_w_rsi_prev,1),
+                                            "趨勢": _rsi_trend, "日K底背離": _has_daily_diverg})
+
+    except Exception:
+        pass
         return
     ai_key = f"ai_signal_{symbol}_{period_label}_{'_'.join(new_signals[:2])}"
     if ai_key in st.session_state:

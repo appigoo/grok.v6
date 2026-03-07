@@ -3430,9 +3430,9 @@ def run_alerts(symbol, period_label, df, trigger_ai=False, mkt=None):
 
     # C3d. MACD 深谷震盪底（圖中特殊場景：DIF=-7.37但柱→-0.099，DIF與DEA快要貼合）
     # 與C3c不同：C3c是「剛完成金叉」，C3d是「即將金叉但DIF仍在極深位，需謹慎」
-    if len(hist) >= 10 and len(dif_s) >= 10:
-        _c3d_dif_cur   = float(dif_s.iloc[-1])
-        _c3d_dea_cur   = float(dea_s.iloc[-1])
+    if len(hist) >= 10 and len(dif) >= 10:
+        _c3d_dif_cur   = float(dif.iloc[-1])
+        _c3d_dea_cur   = float(dea.iloc[-1])
         _c3d_hist_cur  = float(hist.iloc[-1])
         _c3d_hist_min  = float(hist.iloc[-40:].min()) if len(hist) >= 40 else float(hist.min())
         _c3d_hist_range = abs(_c3d_hist_min)

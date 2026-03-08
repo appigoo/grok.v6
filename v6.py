@@ -1630,10 +1630,7 @@ def fetch_options_data(symbol: str) -> dict:
 @st.cache_data(ttl=1800)
 def fetch_mtf_keylevels(symbol: str) -> dict:
     """
-    抓取月K/週K/日K數據，計算：
-    - 關鍵支撐/阻力位（樞軸點 + 歷史高低點 + 整數關口）
-    - 各框架方向（多/空/中性）
-    - 當前價格在各框架中的位置
+    抓取月K/週K/日K數據，計算關鍵支撐/阻力位
     """
     import time as _t
     result = {"symbol": symbol, "price": None, "frames": {}, "error": None}
@@ -1646,138 +1643,129 @@ def fetch_mtf_keylevels(symbol: str) -> dict:
 
     try:
         for fname, interval, period, color in frames_cfg:
-            _t.sleep(0.2)
+            _t.sleep(0.3)
             try:
-                df = yf.download(symbol, period=period, interval=interval,
-                                 auto_adjust=True, progress=False, multi_level_col=False)
-                if df.empty or len(df) < 10:
+                raw = yf.download(symbol, period=period, interval=interval,
+                                  auto_adjust=True, progress=False)
+                if raw is None or raw.empty or len(raw) < 10:
                     result["frames"][fname] = {"error": "數據不足"}
                     continue
 
-                df.columns = [c[0] if isinstance(c, tuple) else c for c in df.columns]
-                close = df["Close"].dropna()
-                high  = df["High"].dropna()
-                low   = df["Low"].dropna()
+                # 統一欄位名稱（處理 MultiIndex）
+                if isinstance(raw.columns, pd.MultiIndex):
+                    raw.columns = [c[0] for c in raw.columns]
+
+                # 確保有必要欄位
+                needed = {"Close", "High", "Low"}
+                if not needed.issubset(set(raw.columns)):
+                    result["frames"][fname] = {"error": f"缺少欄位:{raw.columns.tolist()[:4]}"}
+                    continue
+
+                close = raw["Close"].dropna()
+                high  = raw["High"].dropna()
+                low   = raw["Low"].dropna()
+
+                if len(close) < 10:
+                    result["frames"][fname] = {"error": "有效數據不足10根"}
+                    continue
 
                 price_now = float(close.iloc[-1])
-                if result["price"] is None:
+                if result["price"] is None and price_now > 0:
                     result["price"] = price_now
 
-                # ── 1. 關鍵位識別 ──────────────────────────────────────────
+                # ── 關鍵位識別 ─────────────────────────────────────────────
                 levels = []
-
-                # A. 歷史樞軸高點（局部極大值）
                 window = 3
-                for i in range(window, len(high) - window):
+                n = len(close)
+
+                # 樞軸高點
+                for i in range(window, n - window):
                     h = float(high.iloc[i])
                     if all(h >= float(high.iloc[i-j]) for j in range(1, window+1)) and \
                        all(h >= float(high.iloc[i+j]) for j in range(1, window+1)):
-                        levels.append(("阻力", h, "pivot_high"))
+                        levels.append(("阻力", h, "pivot", 1))
 
-                # B. 歷史樞軸低點（局部極小值）
-                for i in range(window, len(low) - window):
+                # 樞軸低點
+                for i in range(window, n - window):
                     l = float(low.iloc[i])
                     if all(l <= float(low.iloc[i-j]) for j in range(1, window+1)) and \
                        all(l <= float(low.iloc[i+j]) for j in range(1, window+1)):
-                        levels.append(("支撐", l, "pivot_low"))
+                        levels.append(("支撐", l, "pivot", 1))
 
-                # C. 近期高低點（最近20根）
-                recent_h = float(high.iloc[-20:].max())
-                recent_l = float(low.iloc[-20:].min())
-                levels.append(("阻力", recent_h, "近期高點"))
-                levels.append(("支撐", recent_l, "近期低點"))
+                # 近期高低
+                levels.append(("阻力", float(high.iloc[-20:].max()), "近期高", 1))
+                levels.append(("支撐", float(low.iloc[-20:].min()),  "近期低", 1))
+                levels.append(("阻力", float(high.max()), "歷史高", 2))
+                levels.append(("支撐", float(low.min()),  "歷史低", 2))
 
-                # D. 52週（或對應期間）高低點
-                levels.append(("阻力", float(high.max()), "歷史高點"))
-                levels.append(("支撐", float(low.min()),  "歷史低點"))
-
-                # E. 整數關口（price ±20% 內每25/50/100的整數）
+                # 整數關口
                 for step in [25, 50, 100, 200]:
                     base = int(price_now / step) * step
                     for mult in range(-4, 6):
                         lvl = base + mult * step
-                        if 0 < lvl < price_now * 2:
-                            tag = "整數阻力" if lvl > price_now else "整數支撐"
-                            levels.append((tag, float(lvl), f"整數{step}"))
+                        if 0 < lvl < price_now * 2.5:
+                            tag = "阻力" if lvl > price_now else "支撐"
+                            levels.append((tag, float(lvl), f"整{step}", 1))
 
-                # ── 2. 聚類合併（相近 1% 的關鍵位合併）─────────────────────
+                # 聚類合併
                 levels.sort(key=lambda x: x[1])
                 merged = []
-                for typ, price, src in levels:
-                    if merged and abs(price - merged[-1][1]) / max(merged[-1][1], 0.01) < 0.012:
-                        # 合併：保留類型，取均值，累計強度
+                for typ, p, src, w in levels:
+                    if merged and abs(p - merged[-1][1]) / max(merged[-1][1], 0.01) < 0.015:
                         prev = merged[-1]
-                        merged[-1] = (prev[0], (prev[1] + price) / 2,
-                                      prev[2], prev[3] + 1)
+                        merged[-1] = (prev[0], (prev[1]*prev[3] + p*w)/(prev[3]+w),
+                                      prev[2], prev[3]+w)
                     else:
-                        merged.append((typ, price, src, 1))
+                        merged.append((typ, p, src, w))
 
-                # ── 3. 篩出當前價附近最重要的關鍵位 ─────────────────────────
-                # 阻力：當前價上方最近5個（按強度排序）
+                # 篩選上下各6個
                 resistances = sorted(
-                    [(p, s, n) for t, p, s, n in merged
-                     if p > price_now * 1.005 and "支撐" not in t],
+                    [(round(p,2), src, round(w,1))
+                     for t,p,src,w in merged if p > price_now * 1.003],
                     key=lambda x: x[0])[:6]
 
-                # 支撐：當前價下方最近5個（由近到遠）
                 supports = sorted(
-                    [(p, s, n) for t, p, s, n in merged
-                     if p < price_now * 0.995 and "阻力" not in t],
+                    [(round(p,2), src, round(w,1))
+                     for t,p,src,w in merged if p < price_now * 0.997],
                     key=lambda x: -x[0])[:6]
 
-                # ── 4. 框架方向判斷 ───────────────────────────────────────
-                ema20 = close.ewm(span=20, adjust=False).mean()
-                ema60 = close.ewm(span=60, adjust=False).mean() if len(close) >= 60 else ema20
+                # 方向判斷
+                ema20 = close.ewm(span=min(20,n//2), adjust=False).mean()
+                ema60 = close.ewm(span=min(60,n//2), adjust=False).mean()
+                e20   = float(ema20.iloc[-1])
+                e60   = float(ema60.iloc[-1])
+                e20p  = float(ema20.iloc[-5]) if n >= 5 else e20
 
-                e20_now = float(ema20.iloc[-1])
-                e60_now = float(ema60.iloc[-1])
-                e20_prev = float(ema20.iloc[-5]) if len(ema20) >= 5 else e20_now
-
-                # 價格 vs EMA + EMA方向
-                price_above_e20 = price_now > e20_now
-                price_above_e60 = price_now > e60_now
-                e20_rising = e20_now > e20_prev
-
-                if price_above_e20 and price_above_e60 and e20_rising:
-                    direction = "bull"; dir_label = "多頭"; dir_color = "#00ee66"
-                elif not price_above_e20 and not price_above_e60 and not e20_rising:
-                    direction = "bear"; dir_label = "空頭"; dir_color = "#ff5566"
-                elif price_above_e20 and not e20_rising:
-                    direction = "neutral_bear"; dir_label = "偏空震盪"; dir_color = "#ff8844"
-                elif not price_above_e20 and e20_rising:
-                    direction = "neutral_bull"; dir_label = "偏多震盪"; dir_color = "#88ee44"
+                if price_now > e20 and price_now > e60 and e20 > e20p:
+                    direction, dir_label, dir_color = "bull", "多頭", "#00ee66"
+                elif price_now < e20 and price_now < e60 and e20 < e20p:
+                    direction, dir_label, dir_color = "bear", "空頭", "#ff5566"
+                elif price_now > e20 and e20 <= e20p:
+                    direction, dir_label, dir_color = "neutral_bear", "偏空震盪", "#ff8844"
+                elif price_now < e20 and e20 >= e20p:
+                    direction, dir_label, dir_color = "neutral_bull", "偏多震盪", "#88ee44"
                 else:
-                    direction = "neutral"; dir_label = "中性"; dir_color = "#ffcc44"
+                    direction, dir_label, dir_color = "neutral", "中性", "#ffcc44"
 
-                # ── 5. 最近收盤漲跌 ───────────────────────────────────────
-                chg_pct = float((close.iloc[-1] - close.iloc[-2]) / close.iloc[-2] * 100) \
-                          if len(close) >= 2 else 0
+                chg_pct = float((close.iloc[-1]-close.iloc[-2])/close.iloc[-2]*100) if n>=2 else 0
 
-                # ── 6. 距離最近支撐/阻力的百分比 ─────────────────────────
-                nearest_res = resistances[0][0] if resistances else None
-                nearest_sup = supports[0][0] if supports else None
-                dist_res = (nearest_res - price_now) / price_now * 100 if nearest_res else None
-                dist_sup = (price_now - nearest_sup) / price_now * 100 if nearest_sup else None
+                nr = resistances[0][0] if resistances else None
+                ns = supports[0][0]    if supports    else None
 
                 result["frames"][fname] = {
-                    "color":       color,
-                    "price":       price_now,
-                    "direction":   direction,
-                    "dir_label":   dir_label,
-                    "dir_color":   dir_color,
-                    "chg_pct":     round(chg_pct, 2),
-                    "ema20":       round(e20_now, 2),
-                    "ema60":       round(e60_now, 2),
-                    "resistances": [(round(p,2), s, n) for p,s,n in resistances],
-                    "supports":    [(round(p,2), s, n) for p,s,n in supports],
-                    "nearest_res": round(nearest_res, 2) if nearest_res else None,
-                    "nearest_sup": round(nearest_sup, 2) if nearest_sup else None,
-                    "dist_res_pct": round(dist_res, 1) if dist_res else None,
-                    "dist_sup_pct": round(dist_sup, 1) if dist_sup else None,
-                    "bars":        len(close),
+                    "color": color, "price": price_now,
+                    "direction": direction, "dir_label": dir_label, "dir_color": dir_color,
+                    "chg_pct": round(chg_pct, 2),
+                    "ema20": round(e20, 2), "ema60": round(e60, 2),
+                    "resistances": resistances, "supports": supports,
+                    "nearest_res": nr, "nearest_sup": ns,
+                    "dist_res_pct": round((nr-price_now)/price_now*100,1) if nr else None,
+                    "dist_sup_pct": round((price_now-ns)/price_now*100,1) if ns else None,
+                    "bars": n,
                 }
+
             except Exception as _fe:
-                result["frames"][fname] = {"error": str(_fe)[:60]}
+                result["frames"][fname] = {"error": str(_fe)[:80]}
 
         return result
 
@@ -1786,7 +1774,7 @@ def fetch_mtf_keylevels(symbol: str) -> dict:
         return result
 
 
-def render_mtf_keylevel_analysis(symbol: str):
+def render_mtf_keylevel_analysis(symbol: str, current_price: float = None):
     """多時間框架關鍵位分析面板"""
     st.markdown(
         '<div style="display:flex;align-items:center;gap:10px;margin-bottom:4px;">'
@@ -1804,12 +1792,13 @@ def render_mtf_keylevel_analysis(symbol: str):
         st.error(f"載入失敗：{data['error']}")
         return
 
+    # price：優先用快取數據，fallback 用 render_single 傳入的即時價格
     price = float(data.get("price") or 0)
+    if price <= 0 and current_price and current_price > 0:
+        price = float(current_price)
     if price <= 0:
         st.warning("⚠️ 無法取得當前價格，請稍後重試")
         return
-
-    frames = data.get("frames", {})
     frame_order = ["月K", "週K", "日K"]
 
     # ── 三框架方向評分 ──────────────────────────────────────────────────────
@@ -8375,7 +8364,7 @@ def render_single(symbol, interval, show_alerts, max_bars=90, show_pre=False, sh
     # ── 多時間框架關鍵位綜合分析面板 ─────────────────────────────────────────
     if show_mtf_keylevels:
         st.markdown("---")
-        render_mtf_keylevel_analysis(symbol)
+        render_mtf_keylevel_analysis(symbol, current_price=last)
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Sidebar

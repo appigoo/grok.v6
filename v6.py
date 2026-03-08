@@ -1804,7 +1804,11 @@ def render_mtf_keylevel_analysis(symbol: str):
         st.error(f"載入失敗：{data['error']}")
         return
 
-    price = data.get("price", 0)
+    price = float(data.get("price") or 0)
+    if price <= 0:
+        st.warning("⚠️ 無法取得當前價格，請稍後重試")
+        return
+
     frames = data.get("frames", {})
     frame_order = ["月K", "週K", "日K"]
 

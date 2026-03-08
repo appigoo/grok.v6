@@ -1622,6 +1622,483 @@ def fetch_options_data(symbol: str) -> dict:
         return {"error": err_str[:80]}
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+# 🗺️ 多時間框架關鍵位分析（月K / 週K / 日K）
+# 邏輯：自動識別支撐/阻力 → 三框架綜合評分 → 操作建議
+# ══════════════════════════════════════════════════════════════════════════════
+
+@st.cache_data(ttl=1800)
+def fetch_mtf_keylevels(symbol: str) -> dict:
+    """
+    抓取月K/週K/日K數據，計算：
+    - 關鍵支撐/阻力位（樞軸點 + 歷史高低點 + 整數關口）
+    - 各框架方向（多/空/中性）
+    - 當前價格在各框架中的位置
+    """
+    import time as _t
+    result = {"symbol": symbol, "price": None, "frames": {}, "error": None}
+
+    frames_cfg = [
+        ("月K", "1mo", "5y",  "#cc88ff"),
+        ("週K", "1wk", "3y",  "#44aaff"),
+        ("日K", "1d",  "1y",  "#44ee88"),
+    ]
+
+    try:
+        for fname, interval, period, color in frames_cfg:
+            _t.sleep(0.2)
+            try:
+                df = yf.download(symbol, period=period, interval=interval,
+                                 auto_adjust=True, progress=False, multi_level_col=False)
+                if df.empty or len(df) < 10:
+                    result["frames"][fname] = {"error": "數據不足"}
+                    continue
+
+                df.columns = [c[0] if isinstance(c, tuple) else c for c in df.columns]
+                close = df["Close"].dropna()
+                high  = df["High"].dropna()
+                low   = df["Low"].dropna()
+
+                price_now = float(close.iloc[-1])
+                if result["price"] is None:
+                    result["price"] = price_now
+
+                # ── 1. 關鍵位識別 ──────────────────────────────────────────
+                levels = []
+
+                # A. 歷史樞軸高點（局部極大值）
+                window = 3
+                for i in range(window, len(high) - window):
+                    h = float(high.iloc[i])
+                    if all(h >= float(high.iloc[i-j]) for j in range(1, window+1)) and \
+                       all(h >= float(high.iloc[i+j]) for j in range(1, window+1)):
+                        levels.append(("阻力", h, "pivot_high"))
+
+                # B. 歷史樞軸低點（局部極小值）
+                for i in range(window, len(low) - window):
+                    l = float(low.iloc[i])
+                    if all(l <= float(low.iloc[i-j]) for j in range(1, window+1)) and \
+                       all(l <= float(low.iloc[i+j]) for j in range(1, window+1)):
+                        levels.append(("支撐", l, "pivot_low"))
+
+                # C. 近期高低點（最近20根）
+                recent_h = float(high.iloc[-20:].max())
+                recent_l = float(low.iloc[-20:].min())
+                levels.append(("阻力", recent_h, "近期高點"))
+                levels.append(("支撐", recent_l, "近期低點"))
+
+                # D. 52週（或對應期間）高低點
+                levels.append(("阻力", float(high.max()), "歷史高點"))
+                levels.append(("支撐", float(low.min()),  "歷史低點"))
+
+                # E. 整數關口（price ±20% 內每25/50/100的整數）
+                for step in [25, 50, 100, 200]:
+                    base = int(price_now / step) * step
+                    for mult in range(-4, 6):
+                        lvl = base + mult * step
+                        if 0 < lvl < price_now * 2:
+                            tag = "整數阻力" if lvl > price_now else "整數支撐"
+                            levels.append((tag, float(lvl), f"整數{step}"))
+
+                # ── 2. 聚類合併（相近 1% 的關鍵位合併）─────────────────────
+                levels.sort(key=lambda x: x[1])
+                merged = []
+                for typ, price, src in levels:
+                    if merged and abs(price - merged[-1][1]) / max(merged[-1][1], 0.01) < 0.012:
+                        # 合併：保留類型，取均值，累計強度
+                        prev = merged[-1]
+                        merged[-1] = (prev[0], (prev[1] + price) / 2,
+                                      prev[2], prev[3] + 1)
+                    else:
+                        merged.append((typ, price, src, 1))
+
+                # ── 3. 篩出當前價附近最重要的關鍵位 ─────────────────────────
+                # 阻力：當前價上方最近5個（按強度排序）
+                resistances = sorted(
+                    [(p, s, n) for t, p, s, n in merged
+                     if p > price_now * 1.005 and "支撐" not in t],
+                    key=lambda x: x[0])[:6]
+
+                # 支撐：當前價下方最近5個（由近到遠）
+                supports = sorted(
+                    [(p, s, n) for t, p, s, n in merged
+                     if p < price_now * 0.995 and "阻力" not in t],
+                    key=lambda x: -x[0])[:6]
+
+                # ── 4. 框架方向判斷 ───────────────────────────────────────
+                ema20 = close.ewm(span=20, adjust=False).mean()
+                ema60 = close.ewm(span=60, adjust=False).mean() if len(close) >= 60 else ema20
+
+                e20_now = float(ema20.iloc[-1])
+                e60_now = float(ema60.iloc[-1])
+                e20_prev = float(ema20.iloc[-5]) if len(ema20) >= 5 else e20_now
+
+                # 價格 vs EMA + EMA方向
+                price_above_e20 = price_now > e20_now
+                price_above_e60 = price_now > e60_now
+                e20_rising = e20_now > e20_prev
+
+                if price_above_e20 and price_above_e60 and e20_rising:
+                    direction = "bull"; dir_label = "多頭"; dir_color = "#00ee66"
+                elif not price_above_e20 and not price_above_e60 and not e20_rising:
+                    direction = "bear"; dir_label = "空頭"; dir_color = "#ff5566"
+                elif price_above_e20 and not e20_rising:
+                    direction = "neutral_bear"; dir_label = "偏空震盪"; dir_color = "#ff8844"
+                elif not price_above_e20 and e20_rising:
+                    direction = "neutral_bull"; dir_label = "偏多震盪"; dir_color = "#88ee44"
+                else:
+                    direction = "neutral"; dir_label = "中性"; dir_color = "#ffcc44"
+
+                # ── 5. 最近收盤漲跌 ───────────────────────────────────────
+                chg_pct = float((close.iloc[-1] - close.iloc[-2]) / close.iloc[-2] * 100) \
+                          if len(close) >= 2 else 0
+
+                # ── 6. 距離最近支撐/阻力的百分比 ─────────────────────────
+                nearest_res = resistances[0][0] if resistances else None
+                nearest_sup = supports[0][0] if supports else None
+                dist_res = (nearest_res - price_now) / price_now * 100 if nearest_res else None
+                dist_sup = (price_now - nearest_sup) / price_now * 100 if nearest_sup else None
+
+                result["frames"][fname] = {
+                    "color":       color,
+                    "price":       price_now,
+                    "direction":   direction,
+                    "dir_label":   dir_label,
+                    "dir_color":   dir_color,
+                    "chg_pct":     round(chg_pct, 2),
+                    "ema20":       round(e20_now, 2),
+                    "ema60":       round(e60_now, 2),
+                    "resistances": [(round(p,2), s, n) for p,s,n in resistances],
+                    "supports":    [(round(p,2), s, n) for p,s,n in supports],
+                    "nearest_res": round(nearest_res, 2) if nearest_res else None,
+                    "nearest_sup": round(nearest_sup, 2) if nearest_sup else None,
+                    "dist_res_pct": round(dist_res, 1) if dist_res else None,
+                    "dist_sup_pct": round(dist_sup, 1) if dist_sup else None,
+                    "bars":        len(close),
+                }
+            except Exception as _fe:
+                result["frames"][fname] = {"error": str(_fe)[:60]}
+
+        return result
+
+    except Exception as e:
+        result["error"] = str(e)[:80]
+        return result
+
+
+def render_mtf_keylevel_analysis(symbol: str):
+    """多時間框架關鍵位分析面板"""
+    st.markdown(
+        '<div style="display:flex;align-items:center;gap:10px;margin-bottom:4px;">'
+        '<div style="font-size:1.1rem;font-weight:900;color:#e0e8ff;font-family:monospace;">'
+        '🗺️ 多框架關鍵位分析</div>'
+        '<div style="font-size:0.7rem;color:#445566;border:1px solid #223344;border-radius:10px;'
+        'padding:1px 8px;">月K · 週K · 日K 三框架綜合</div>'
+        '</div>',
+        unsafe_allow_html=True)
+
+    with st.spinner(f"計算 {symbol} 關鍵支撐阻力位..."):
+        data = fetch_mtf_keylevels(symbol)
+
+    if data.get("error"):
+        st.error(f"載入失敗：{data['error']}")
+        return
+
+    price = data.get("price", 0)
+    frames = data.get("frames", {})
+    frame_order = ["月K", "週K", "日K"]
+
+    # ── 三框架方向評分 ──────────────────────────────────────────────────────
+    dir_scores = {"bull": 2, "neutral_bull": 1, "neutral": 0, "neutral_bear": -1, "bear": -2}
+    total_score = 0
+    valid_frames = 0
+    for fn in frame_order:
+        fd = frames.get(fn, {})
+        if "error" not in fd:
+            total_score += dir_scores.get(fd.get("direction", "neutral"), 0)
+            valid_frames += 1
+
+    if valid_frames > 0:
+        avg_score = total_score / valid_frames
+        if avg_score >= 1.5:
+            overall = "🟢 三框架一致多頭"; ov_color = "#00ee66"; ov_action = "可積極做多"
+        elif avg_score >= 0.5:
+            overall = "🟡 偏多（有分歧）";  ov_color = "#aaee44"; ov_action = "輕倉偏多，等信號確認"
+        elif avg_score >= -0.5:
+            overall = "⚪ 多空分歧震盪";   ov_color = "#ffcc44"; ov_action = "觀望為主，等突破方向"
+        elif avg_score >= -1.5:
+            overall = "🟠 偏空（有分歧）";  ov_color = "#ff8844"; ov_action = "輕倉偏空，設好止損"
+        else:
+            overall = "🔴 三框架一致空頭"; ov_color = "#ff5566"; ov_action = "可積極做空"
+    else:
+        overall = "⚪ 數據不足"; ov_color = "#778899"; ov_action = "暫無建議"
+
+    # ── 找跨框架確認的關鍵位（月K+週K+日K都有的相近水平）────────────────────
+    def _collect_levels(frames, frame_order):
+        all_res, all_sup = [], []
+        for fn in frame_order:
+            fd = frames.get(fn, {})
+            if "error" in fd: continue
+            for p, s, n in fd.get("resistances", []):
+                all_res.append((p, fn))
+            for p, s, n in fd.get("supports", []):
+                all_sup.append((p, fn))
+        return all_res, all_sup
+
+    all_res, all_sup = _collect_levels(frames, frame_order)
+
+    def _find_confluences(levels, threshold=0.025):
+        if not levels: return []
+        levels_s = sorted(levels, key=lambda x: x[0])
+        groups = []
+        cur_group = [levels_s[0]]
+        for item in levels_s[1:]:
+            if abs(item[0] - cur_group[0][0]) / max(cur_group[0][0], 0.01) <= threshold:
+                cur_group.append(item)
+            else:
+                groups.append(cur_group)
+                cur_group = [item]
+        groups.append(cur_group)
+        result = []
+        for g in groups:
+            avg_price = sum(x[0] for x in g) / len(g)
+            frames_hit = list(set(x[1] for x in g))
+            result.append((round(avg_price, 2), frames_hit, len(g)))
+        return sorted(result, key=lambda x: -len(x[1]))
+
+    conf_res = _find_confluences([(p, fn) for p, fn in all_res if p > price])
+    conf_sup = _find_confluences([(p, fn) for p, fn in all_sup if p < price])
+
+    # ── 操作建議生成 ────────────────────────────────────────────────────────
+    def _make_suggestion(price, conf_res, conf_sup, avg_score, frames):
+        day = frames.get("日K", {})
+        week = frames.get("週K", {})
+
+        nearest_res = conf_res[0][0] if conf_res else (day.get("nearest_res") or price * 1.05)
+        nearest_sup = conf_sup[0][0] if conf_sup else (day.get("nearest_sup") or price * 0.95)
+
+        # 多頭劇本
+        if avg_score >= 0.5:
+            entry   = round(price, 2)
+            sl      = round(nearest_sup * 0.99, 2)
+            tp1     = round(nearest_res, 2)
+            tp2     = round(nearest_res * 1.03, 2) if len(conf_res) > 1 else round(nearest_res * 1.05, 2)
+            sl_pct  = round((entry - sl) / entry * 100, 1)
+            tp1_pct = round((tp1 - entry) / entry * 100, 1)
+            rr1     = round(abs(tp1 - entry) / max(abs(entry - sl), 0.01), 1)
+            return {
+                "dir": "LONG", "entry": entry, "sl": sl, "tp1": tp1, "tp2": tp2,
+                "sl_pct": sl_pct, "tp1_pct": tp1_pct, "rr1": rr1,
+                "cond": f"守住支撐 ${nearest_sup:.2f}，等待量能確認後進多",
+                "break_cond": f"若日K收盤跌破 ${nearest_sup:.2f} → 止損出場",
+            }
+        # 空頭劇本
+        elif avg_score <= -0.5:
+            entry   = round(price, 2)
+            sl      = round(nearest_res * 1.01, 2)
+            tp1     = round(nearest_sup, 2)
+            tp2     = round(nearest_sup * 0.97, 2) if len(conf_sup) > 1 else round(nearest_sup * 0.95, 2)
+            sl_pct  = round((sl - entry) / entry * 100, 1)
+            tp1_pct = round((entry - tp1) / entry * 100, 1)
+            rr1     = round(abs(entry - tp1) / max(abs(sl - entry), 0.01), 1)
+            return {
+                "dir": "SHORT", "entry": entry, "sl": sl, "tp1": tp1, "tp2": tp2,
+                "sl_pct": sl_pct, "tp1_pct": tp1_pct, "rr1": rr1,
+                "cond": f"阻力 ${nearest_res:.2f} 壓制未突破，等回調後進空",
+                "break_cond": f"若日K收盤站上 ${nearest_res:.2f} → 止損出場",
+            }
+        else:
+            return {
+                "dir": "WAIT", "entry": price, "sl": None, "tp1": None, "tp2": None,
+                "sl_pct": 0, "tp1_pct": 0, "rr1": 0,
+                "cond": f"多空分歧，等待突破 ${nearest_res:.2f} 或跌破 ${nearest_sup:.2f} 再入場",
+                "break_cond": f"突破 ${nearest_res:.2f} → 做多；跌破 ${nearest_sup:.2f} → 做空",
+            }
+
+    sug = _make_suggestion(price, conf_res, conf_sup, avg_score if valid_frames > 0 else 0, frames)
+
+    # ════════════════════ 渲染開始 ════════════════════════════════════════════
+
+    # ── 頂部：整體方向 + 當前價 ────────────────────────────────────────────
+    st.markdown(
+        f'<div style="background:#07090f;border:1px solid {ov_color}44;border-radius:14px;'
+        f'padding:16px 20px;margin-bottom:12px;">'
+        f'<div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;">'
+        f'<div>'
+        f'<div style="font-size:1.15rem;font-weight:800;color:{ov_color};">{overall}</div>'
+        f'<div style="font-size:0.78rem;color:#778899;margin-top:3px;">💡 {ov_action}</div>'
+        f'</div>'
+        f'<div style="text-align:right;">'
+        f'<div style="font-size:1.6rem;font-weight:900;color:#eef;font-family:monospace;">${price:.2f}</div>'
+        f'<div style="font-size:0.72rem;color:#445566;">{symbol} 當前價</div>'
+        f'</div></div>'
+        f'</div>',
+        unsafe_allow_html=True)
+
+    # ── 三框架並排 ─────────────────────────────────────────────────────────
+    cols = st.columns(3)
+    for ci, fname in enumerate(frame_order):
+        fd = frames.get(fname, {})
+        with cols[ci]:
+            if "error" in fd:
+                st.markdown(
+                    f'<div style="background:#0c1220;border-radius:10px;padding:12px;'
+                    f'color:#445566;font-size:0.78rem;">⚠️ {fname}<br>{fd["error"]}</div>',
+                    unsafe_allow_html=True)
+                continue
+
+            fc    = fd["color"]
+            dlbl  = fd["dir_label"]
+            dcol  = fd["dir_color"]
+            nr    = fd.get("nearest_res")
+            ns    = fd.get("nearest_sup")
+            dr    = fd.get("dist_res_pct")
+            ds    = fd.get("dist_sup_pct")
+            chg   = fd.get("chg_pct", 0)
+            chg_c = "#00ee66" if chg >= 0 else "#ff5566"
+
+            # 支撐/阻力列表
+            res_html = ""
+            for i, (rp, rs, rn) in enumerate(fd["resistances"][:4]):
+                is_nearest = (i == 0)
+                weight = "font-weight:700;" if is_nearest else ""
+                bg = "background:#1a0a28;" if is_nearest else ""
+                res_html += (f'<div style="{bg}border-radius:3px;padding:2px 6px;'
+                             f'display:flex;justify-content:space-between;">'
+                             f'<span style="color:#cc88ff;{weight}">${rp:.2f}</span>'
+                             f'<span style="color:#445566;font-size:0.65rem;">{rn}×</span></div>')
+
+            sup_html = ""
+            for i, (sp, ss, sn) in enumerate(fd["supports"][:4]):
+                is_nearest = (i == 0)
+                weight = "font-weight:700;" if is_nearest else ""
+                bg = "background:#0a1a28;" if is_nearest else ""
+                sup_html += (f'<div style="{bg}border-radius:3px;padding:2px 6px;'
+                             f'display:flex;justify-content:space-between;">'
+                             f'<span style="color:#44aaff;{weight}">${sp:.2f}</span>'
+                             f'<span style="color:#445566;font-size:0.65rem;">{sn}×</span></div>')
+
+            card = (
+                f'<div style="background:#0c1220;border:1px solid {fc}44;'
+                f'border-top:3px solid {fc};border-radius:10px;padding:12px 14px;">'
+
+                # 標題行
+                f'<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">'
+                f'<span style="color:{fc};font-weight:800;font-size:0.9rem;">{fname}</span>'
+                f'<span style="background:{dcol}22;color:{dcol};border-radius:10px;'
+                f'padding:1px 8px;font-size:0.72rem;">{dlbl}</span>'
+                f'</div>'
+
+                # 當根漲跌 + EMA
+                f'<div style="font-size:0.72rem;color:{chg_c};margin-bottom:6px;">'
+                f'本根 {chg:+.2f}%　EMA20:{fd["ema20"]:.2f}</div>'
+
+                # 阻力
+                f'<div style="font-size:0.7rem;color:#886699;font-weight:600;'
+                f'margin-bottom:3px;margin-top:4px;">▲ 阻力'
+                + (f'　<span style="color:#668866;font-size:0.65rem;">最近+{dr:.1f}%</span>' if dr else '')
+                + f'</div>'
+                + res_html
+
+                # 當前價指示條
+                + f'<div style="background:#44aaff;border-radius:2px;height:2px;margin:6px 0;opacity:0.5;"></div>'
+                f'<div style="text-align:center;font-size:0.72rem;color:#aabbcc;'
+                f'font-weight:700;margin:-2px 0 4px;">📍 ${price:.2f}</div>'
+
+                # 支撐
+                + f'<div style="font-size:0.7rem;color:#446699;font-weight:600;margin-bottom:3px;">▼ 支撐'
+                + (f'　<span style="color:#668866;font-size:0.65rem;">最近-{ds:.1f}%</span>' if ds else '')
+                + f'</div>'
+                + sup_html
+                + f'</div>'
+            )
+            st.markdown(card, unsafe_allow_html=True)
+
+    # ── 多框架共振關鍵位 ────────────────────────────────────────────────────
+    if conf_res or conf_sup:
+        st.markdown(
+            '<div style="font-size:0.8rem;font-weight:700;color:#ffcc44;'
+            'margin:14px 0 6px;">⚡ 多框架共振關鍵位（越多框架確認越強）</div>',
+            unsafe_allow_html=True)
+
+        lvl_html = '<div style="display:flex;flex-wrap:wrap;gap:8px;">'
+
+        for p, fnames, n in conf_res[:5]:
+            strength = len(fnames)
+            sc = "#ff44aa" if strength >= 3 else "#cc88ff" if strength == 2 else "#886699"
+            tag = "🔴🔴🔴" if strength >= 3 else "🔴🔴" if strength == 2 else "🔴"
+            dist = round((p - price) / price * 100, 1)
+            lvl_html += (
+                f'<div style="background:#1a0a20;border:1px solid {sc}55;border-radius:8px;'
+                f'padding:6px 12px;min-width:120px;">'
+                f'<div style="color:{sc};font-weight:700;">{tag} ${p:.2f}</div>'
+                f'<div style="color:#556677;font-size:0.68rem;">'
+                f'{"+".join(fnames)}　+{dist:.1f}%</div></div>')
+
+        for p, fnames, n in conf_sup[:5]:
+            strength = len(fnames)
+            sc = "#44ff88" if strength >= 3 else "#44aaff" if strength == 2 else "#446688"
+            tag = "🟢🟢🟢" if strength >= 3 else "🟢🟢" if strength == 2 else "🟢"
+            dist = round((price - p) / price * 100, 1)
+            lvl_html += (
+                f'<div style="background:#0a1a10;border:1px solid {sc}55;border-radius:8px;'
+                f'padding:6px 12px;min-width:120px;">'
+                f'<div style="color:{sc};font-weight:700;">{tag} ${p:.2f}</div>'
+                f'<div style="color:#556677;font-size:0.68rem;">'
+                f'{"+".join(fnames)}　-{dist:.1f}%</div></div>')
+
+        lvl_html += '</div>'
+        st.markdown(lvl_html, unsafe_allow_html=True)
+
+    # ── 操作建議 ────────────────────────────────────────────────────────────
+    st.markdown('<div style="height:10px;"></div>', unsafe_allow_html=True)
+    dir_c  = {"LONG": "#00ee66", "SHORT": "#ff5566", "WAIT": "#ffcc44"}[sug["dir"]]
+    dir_ic = {"LONG": "▲ 做多",  "SHORT": "▼ 做空",  "WAIT": "⟺ 觀望"}[sug["dir"]]
+
+    sug_html = (
+        f'<div style="background:#07090f;border:1px solid {dir_c}44;'
+        f'border-left:4px solid {dir_c};border-radius:12px;padding:16px 20px;">'
+        f'<div style="font-size:0.72rem;color:#445566;margin-bottom:8px;letter-spacing:1px;">'
+        f'📋 三框架綜合操作建議</div>'
+        f'<div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:12px;">'
+        f'<span style="background:{dir_c}22;color:{dir_c};border:1px solid {dir_c}55;'
+        f'border-radius:20px;padding:3px 14px;font-weight:800;font-size:0.95rem;">{dir_ic}</span>'
+        f'<span style="color:#778899;font-size:0.78rem;">{sug["cond"]}</span>'
+        f'</div>'
+    )
+
+    if sug["dir"] != "WAIT" and sug["sl"]:
+        sug_html += (
+            f'<div style="display:flex;gap:16px;flex-wrap:wrap;margin-bottom:10px;">'
+            f'<div><span style="color:#445577;font-size:0.72rem;">進場</span> '
+            f'<span style="color:#44aaff;font-weight:700;font-size:1.0rem;">${sug["entry"]:.2f}</span></div>'
+            f'<div><span style="color:#445577;font-size:0.72rem;">止損</span> '
+            f'<span style="color:#ff4444;font-weight:700;">${sug["sl"]:.2f}</span>'
+            f'<span style="color:#663333;font-size:0.7rem;"> (-{sug["sl_pct"]:.1f}%)</span></div>'
+            f'<div><span style="color:#445577;font-size:0.72rem;">止盈①</span> '
+            f'<span style="color:#44ee66;font-weight:700;">${sug["tp1"]:.2f}</span>'
+            f'<span style="color:#336633;font-size:0.7rem;"> (+{sug["tp1_pct"]:.1f}% R:{sug["rr1"]:.1f})</span></div>'
+            f'<div><span style="color:#445577;font-size:0.72rem;">止盈②</span> '
+            f'<span style="color:#aaffcc;font-weight:600;">${sug["tp2"]:.2f}</span></div>'
+            f'</div>'
+        )
+
+    sug_html += (
+        f'<div style="background:#0c1220;border-radius:6px;padding:8px 12px;'
+        f'font-size:0.73rem;color:#ffaa44;">'
+        f'⚠️ 出場條件：{sug["break_cond"]}</div>'
+        f'<div style="font-size:0.65rem;color:#334455;margin-top:8px;">'
+        f'* 關鍵位基於60日月K/週K/日K樞軸點自動計算｜僅供技術參考，不構成投資建議</div>'
+        f'</div>'
+    )
+    st.markdown(sug_html, unsafe_allow_html=True)
+
+    # 重新計算按鈕
+    if st.button(f"🔄 重新計算關鍵位 ({symbol})", key=f"recalc_mtf_{symbol}"):
+        fetch_mtf_keylevels.clear()
+        st.rerun()
+
+
 def render_options_panel(symbol: str):
     """期權數據面板 — P/C Ratio、IV、最大痛點、流向、到期日分佈"""
     with st.spinner(f"載入 {symbol} 期權數據（最多約5秒）..."):
@@ -7885,6 +8362,11 @@ def render_single(symbol, interval, show_alerts, max_bars=90, show_pre=False, sh
             unsafe_allow_html=True)
         render_options_panel(symbol)
 
+    # ── 多時間框架關鍵位綜合分析面板 ─────────────────────────────────────────
+    if show_mtf_keylevels:
+        st.markdown("---")
+        render_mtf_keylevel_analysis(symbol)
+
 # ══════════════════════════════════════════════════════════════════════════════
 # Sidebar
 # ══════════════════════════════════════════════════════════════════════════════
@@ -7982,6 +8464,7 @@ with st.sidebar:
     show_ai      = st.toggle("啟用 AI 技術分析",  value=True)
     show_social  = st.toggle("社群情緒面板 (StockTwits/Reddit)", value=True)
     show_options = st.toggle("📊 期權數據面板 (P/C Ratio / IV / 流向)", value=True)
+    show_mtf_keylevels = st.toggle("🗺️ 多框架關鍵位分析 (月/週/日)", value=True)
 
     st.markdown("---")
     st.markdown("**🌙 延長時段**")

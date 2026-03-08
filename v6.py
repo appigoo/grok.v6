@@ -8267,6 +8267,248 @@ if st.session_state.alert_log:
 
     # ── 警示記錄列表 ─────────────────────────────────────────────────────────
     st.subheader("🔔 警示訊息記錄")
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # 🧠 智慧摘要面板：自動彙整所有警示 → 一句話交易建議
+    # ══════════════════════════════════════════════════════════════════════════
+    def render_alert_summary(log_data: list):
+        """
+        彙整警示記錄，依每個股票輸出：
+        - 多空評分 / 信心條
+        - 最重要的3個信號（按優先級篩選）
+        - 一句話操作建議（方向 + 進場條件 + 止損位）
+        - 衝突警告
+        """
+        if not log_data:
+            return
+
+        # 按股票分組
+        from collections import defaultdict
+        sym_log = defaultdict(list)
+        for e in log_data:
+            sym_log[e["股票"]].append(e)
+
+        # 信號優先級（越高越重要）
+        PRIORITY = {
+            "F6": 10, "F7": 10, "F8": 10, "F9": 10,       # 10年100% WR
+            "P6": 9,  "Q2": 8,  "突破跳空": 9,              # 極高置信
+            "Q1": 7,  "衰竭跳空": 8,                         # 真空帶/衰竭
+            "I2": 7,  "頂背離": 7, "底背離": 7,              # MACD背離
+            "D5": 6,  "空頭排列": 6, "E5": 6,                # 趨勢結構
+            "VIX極度恐慌": 6, "VIX暴": 5,                    # VIX極端
+            "Q3": 5,  "DTR": 5,                              # 波幅警戒
+            "MACD金叉": 4, "MACD死叉": 4,                    # MACD
+            "EMA金叉": 3, "EMA死叉": 3,                       # EMA
+            "異常放量": 3, "跳空": 3,                         # 量/跳空
+        }
+
+        def _score_msg(msg: str) -> int:
+            for k, v in PRIORITY.items():
+                if k in msg:
+                    return v
+            return 1
+
+        def _build_suggestion(sym: str, entries: list) -> dict:
+            bull_msgs = [e for e in entries if e["類型"] == "bull"]
+            bear_msgs = [e for e in entries if e["類型"] == "bear"]
+            info_msgs = [e for e in entries if e["類型"] == "info"]
+
+            bull_score = sum(_score_msg(e["訊息"]) for e in bull_msgs)
+            bear_score = sum(_score_msg(e["訊息"]) for e in bear_msgs)
+            total      = bull_score + bear_score
+            bull_pct   = int(bull_score / total * 100) if total > 0 else 50
+
+            # 方向判斷
+            if bull_pct >= 65:
+                direction = "LONG"
+                dir_color = "#00ee66"
+                dir_icon  = "▲"
+                dir_label = "做多"
+            elif bull_pct <= 35:
+                direction = "SHORT"
+                dir_color = "#ff5566"
+                dir_icon  = "▼"
+                dir_label = "做空"
+            else:
+                direction = "WAIT"
+                dir_color = "#ffcc44"
+                dir_icon  = "⟺"
+                dir_label = "觀望"
+
+            # 衝突偵測
+            has_conflict = len(bull_msgs) > 0 and len(bear_msgs) > 0
+            conflict_str = ""
+            if has_conflict:
+                if direction in ("LONG", "SHORT"):
+                    conflict_str = f"⚡ 存在反向信號 {len(bear_msgs if direction=='LONG' else bull_msgs)} 條，建議輕倉或等確認"
+
+            # 前3重要信號（多空各取優先級最高的）
+            top_bull = sorted(bull_msgs, key=lambda e: _score_msg(e["訊息"]), reverse=True)[:2]
+            top_bear = sorted(bear_msgs, key=lambda e: _score_msg(e["訊息"]), reverse=True)[:2]
+            top_info = sorted(info_msgs, key=lambda e: _score_msg(e["訊息"]), reverse=True)[:1]
+
+            key3 = []
+            if direction == "LONG":
+                key3 = top_bull[:2] + top_bear[:1]
+            elif direction == "SHORT":
+                key3 = top_bear[:2] + top_bull[:1]
+            else:
+                key3 = (top_bull[:1] + top_bear[:1] + top_info[:1])
+
+            # 簡化訊息：截取核心部分
+            def _shorten(msg: str) -> str:
+                # 取【】中的標題 + 前40字
+                import re
+                m = re.search(r'【([^】]{1,30})】', msg)
+                title = m.group(1) if m else ""
+                # 去掉回測統計等長尾
+                clean = re.sub(r'｜10年回測.*', '', msg)
+                clean = re.sub(r'（n=\d+）', '', clean)
+                clean = re.sub(r'回測隔日.*', '', clean)
+                return clean[:55].strip()
+
+            key3_texts = []
+            for e in key3:
+                ic = {"bull": "🟢", "bear": "🔴", "info": "🔵", "vol": "🟣"}.get(e["類型"], "⚪")
+                key3_texts.append(f"{ic} {_shorten(e['訊息'])}")
+
+            # 找系統建議交易中對應的（若有）
+            sug_entry = None
+            for s in st.session_state.get("trade_suggestions", []):
+                if s["股票"] == sym and s["狀態"] == "待確認":
+                    sug_entry = s
+                    break
+
+            return {
+                "symbol":      sym,
+                "direction":   direction,
+                "dir_color":   dir_color,
+                "dir_icon":    dir_icon,
+                "dir_label":   dir_label,
+                "bull_pct":    bull_pct,
+                "bull_count":  len(bull_msgs),
+                "bear_count":  len(bear_msgs),
+                "total":       len(entries),
+                "key3":        key3_texts,
+                "conflict":    conflict_str,
+                "has_conflict":has_conflict,
+                "sug":         sug_entry,
+            }
+
+        summaries = {sym: _build_suggestion(sym, entries)
+                     for sym, entries in sym_log.items()}
+
+        # ── 渲染摘要面板 ──────────────────────────────────────────────────────
+        st.markdown(
+            '<div style="background:#07090f;border:1px solid #1e2e48;border-radius:14px;'
+            'padding:16px 20px;margin-bottom:16px;">'
+            '<div style="font-size:0.78rem;font-weight:700;color:#445577;letter-spacing:1px;'
+            'margin-bottom:12px;">🧠 智慧摘要 · 一鍵讀懂所有警示</div>',
+            unsafe_allow_html=True)
+
+        for sym, s in summaries.items():
+            bc = s["bull_pct"]
+            bear_pct = 100 - bc
+            dc = s["dir_color"]
+            sug = s["sug"]
+
+            # 進場/止損文字
+            trade_line = ""
+            if sug:
+                ep, sl1, tp1 = sug["進場"], sug["止損"], sug["止盈1"]
+                rr = sug["盈虧比1"]
+                sl_pct  = abs(ep - sl1) / ep * 100
+                tp_pct  = abs(tp1 - ep) / ep * 100
+                sug_color = "#00ee66" if sug["方向"] == "LONG" else "#ff5566"
+                trade_line = (
+                    f'<div style="display:flex;gap:14px;flex-wrap:wrap;margin-top:8px;'
+                    f'background:#0c1520;border-radius:6px;padding:8px 12px;align-items:center;">'
+                    f'<span style="color:#778899;font-size:0.7rem;">系統建議</span>'
+                    f'<span style="color:{sug_color};font-weight:700;font-size:0.85rem;">'
+                    f'{"▲ LONG" if sug["方向"]=="LONG" else "▼ SHORT"}</span>'
+                    f'<span style="color:#556677;font-size:0.72rem;">進場</span>'
+                    f'<span style="color:#44aaff;font-weight:600;">${ep:.2f}</span>'
+                    f'<span style="color:#556677;font-size:0.72rem;">止損</span>'
+                    f'<span style="color:#ff4444;font-weight:600;">${sl1:.2f}</span>'
+                    f'<span style="color:#663333;font-size:0.68rem;">(-{sl_pct:.1f}%)</span>'
+                    f'<span style="color:#556677;font-size:0.72rem;">止盈</span>'
+                    f'<span style="color:#44ee66;font-weight:600;">${tp1:.2f}</span>'
+                    f'<span style="color:#336633;font-size:0.68rem;">(+{tp_pct:.1f}% R:{rr:.1f})</span>'
+                    f'<span style="color:#445566;font-size:0.65rem;margin-left:4px;">'
+                    f'WR {sug["WR"]:.0f}% n={sug["樣本數"]} {sug["置信"]}</span>'
+                    f'</div>'
+                )
+            elif s["direction"] != "WAIT":
+                # 無系統建議時給文字建議
+                if s["direction"] == "LONG":
+                    trade_line = (
+                        f'<div style="font-size:0.75rem;color:#667788;margin-top:6px;'
+                        f'padding:6px 10px;background:#0c1520;border-radius:6px;">'
+                        f'💡 等待回調至支撐確認，量縮後再進場；無高置信跳空信號，輕倉試多</div>')
+                else:
+                    trade_line = (
+                        f'<div style="font-size:0.75rem;color:#667788;margin-top:6px;'
+                        f'padding:6px 10px;background:#0c1520;border-radius:6px;">'
+                        f'💡 等待反彈至阻力壓制確認，無高置信跳空信號，輕倉試空，嚴設止損</div>')
+
+            # 衝突標籤
+            conflict_html = ""
+            if s["has_conflict"]:
+                conflict_html = (
+                    f'<span style="background:#2a1a00;color:#ffaa44;border:1px solid #664400;'
+                    f'border-radius:4px;padding:1px 7px;font-size:0.68rem;margin-left:6px;">'
+                    f'⚡ 多空分歧</span>')
+
+            card = (
+                f'<div style="background:#0c1220;border:1px solid {dc}33;border-left:3px solid {dc};'
+                f'border-radius:10px;padding:14px 16px;margin:8px 0;">'
+
+                # 頂行：股票名 + 方向 + 衝突
+                f'<div style="display:flex;align-items:center;gap:10px;margin-bottom:10px;">'
+                f'<span style="color:#eef;font-weight:800;font-size:1.05rem;">${sym}</span>'
+                f'<span style="background:{dc}22;color:{dc};border:1px solid {dc}55;'
+                f'border-radius:20px;padding:2px 12px;font-weight:700;font-size:0.85rem;">'
+                f'{s["dir_icon"]} {s["dir_label"]}</span>'
+                f'{conflict_html}'
+                f'<span style="color:#334455;font-size:0.7rem;margin-left:auto;">'
+                f'📊 {s["bull_count"]}多 / {s["bear_count"]}空 / {s["total"]}條</span>'
+                f'</div>'
+
+                # 多空信心條
+                f'<div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;">'
+                f'<span style="color:#00ee66;font-size:0.68rem;width:28px;">{bc}%</span>'
+                f'<div style="flex:1;background:#1e2e1e;border-radius:4px;height:7px;overflow:hidden;">'
+                f'<div style="width:{bc}%;background:linear-gradient(90deg,#00ee66,#44bb88);'
+                f'height:7px;border-radius:4px;"></div></div>'
+                f'<div style="flex:1;background:#2e1e1e;border-radius:4px;height:7px;overflow:hidden;">'
+                f'<div style="width:{bear_pct}%;background:linear-gradient(90deg,#bb4444,#ff5566);'
+                f'height:7px;border-radius:4px;float:right;"></div></div>'
+                f'<span style="color:#ff5566;font-size:0.68rem;width:28px;text-align:right;">{bear_pct}%</span>'
+                f'</div>'
+
+                # 關鍵信號（前3）
+                f'<div style="display:flex;flex-direction:column;gap:3px;margin-bottom:6px;">'
+            )
+            for kt in s["key3"]:
+                card += (
+                    f'<div style="font-size:0.75rem;color:#99aabb;'
+                    f'background:#0a1018;border-radius:4px;padding:3px 8px;">{kt}</div>')
+            card += f'</div>'
+
+            # 衝突說明
+            if s["conflict"]:
+                card += (f'<div style="font-size:0.72rem;color:#ffaa44;'
+                         f'background:#1a1000;border-radius:4px;padding:4px 8px;'
+                         f'margin-bottom:4px;">{s["conflict"]}</div>')
+
+            card += trade_line + '</div>'
+            st.markdown(card, unsafe_allow_html=True)
+
+        st.markdown('</div>', unsafe_allow_html=True)
+
+    render_alert_summary(log)
+    st.markdown("---")
+
     cls_map = {"bull":"alert-bull","bear":"alert-bear","vol":"alert-vol","info":"alert-info"}
     for e in log[:40]:
         cls   = cls_map.get(e["類型"], "alert-info")

@@ -1871,19 +1871,21 @@ def render_mtf_keylevel_analysis(symbol: str):
 
     # ── 操作建議生成 ────────────────────────────────────────────────────────
     def _make_suggestion(price, conf_res, conf_sup, avg_score, frames):
-        day = frames.get("日K", {})
+        day  = frames.get("日K", {})
         week = frames.get("週K", {})
+
+        # price 防護
+        safe_price = float(price) if (price and float(price) > 0) else 100.0
 
         nearest_res = conf_res[0][0] if conf_res else (day.get("nearest_res") or None)
         nearest_sup = conf_sup[0][0] if conf_sup else (day.get("nearest_sup") or None)
 
-        # fallback：若仍為 None，用當前價 ±5%
-        if nearest_res is None: nearest_res = round(price * 1.05, 2)
-        if nearest_sup is None: nearest_sup = round(price * 0.95, 2)
+        if nearest_res is None: nearest_res = round(safe_price * 1.05, 2)
+        if nearest_sup is None: nearest_sup = round(safe_price * 0.95, 2)
 
         # 多頭劇本
         if avg_score >= 0.5:
-            entry   = round(price, 2)
+            entry   = round(safe_price, 2)
             sl      = round(nearest_sup * 0.99, 2)
             tp1     = round(nearest_res, 2)
             tp2     = round(nearest_res * 1.03, 2) if len(conf_res) > 1 else round(nearest_res * 1.05, 2)
@@ -1898,7 +1900,7 @@ def render_mtf_keylevel_analysis(symbol: str):
             }
         # 空頭劇本
         elif avg_score <= -0.5:
-            entry   = round(price, 2)
+            entry   = round(safe_price, 2)
             sl      = round(nearest_res * 1.01, 2)
             tp1     = round(nearest_sup, 2)
             tp2     = round(nearest_sup * 0.97, 2) if len(conf_sup) > 1 else round(nearest_sup * 0.95, 2)
@@ -1913,7 +1915,7 @@ def render_mtf_keylevel_analysis(symbol: str):
             }
         else:
             return {
-                "dir": "WAIT", "entry": price, "sl": None, "tp1": None, "tp2": None,
+                "dir": "WAIT", "entry": safe_price, "sl": None, "tp1": None, "tp2": None,
                 "sl_pct": 0, "tp1_pct": 0, "rr1": 0,
                 "cond": f"多空分歧，等待突破 ${nearest_res:.2f} 或跌破 ${nearest_sup:.2f} 再入場",
                 "break_cond": f"突破 ${nearest_res:.2f} → 做多；跌破 ${nearest_sup:.2f} → 做空",

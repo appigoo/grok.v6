@@ -1799,6 +1799,8 @@ def render_mtf_keylevel_analysis(symbol: str, current_price: float = None):
     if price <= 0:
         st.warning("⚠️ 無法取得當前價格，請稍後重試")
         return
+
+    frames = data.get("frames", {})
     frame_order = ["月K", "週K", "日K"]
 
     # ── 三框架方向評分 ──────────────────────────────────────────────────────

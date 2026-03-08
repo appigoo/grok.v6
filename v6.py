@@ -1874,8 +1874,12 @@ def render_mtf_keylevel_analysis(symbol: str):
         day = frames.get("日K", {})
         week = frames.get("週K", {})
 
-        nearest_res = conf_res[0][0] if conf_res else (day.get("nearest_res") or price * 1.05)
-        nearest_sup = conf_sup[0][0] if conf_sup else (day.get("nearest_sup") or price * 0.95)
+        nearest_res = conf_res[0][0] if conf_res else (day.get("nearest_res") or None)
+        nearest_sup = conf_sup[0][0] if conf_sup else (day.get("nearest_sup") or None)
+
+        # fallback：若仍為 None，用當前價 ±5%
+        if nearest_res is None: nearest_res = round(price * 1.05, 2)
+        if nearest_sup is None: nearest_sup = round(price * 0.95, 2)
 
         # 多頭劇本
         if avg_score >= 0.5:
